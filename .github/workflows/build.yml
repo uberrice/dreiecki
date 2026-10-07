@@ -1,0 +1,126 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Runs on main are queued, never cancelled, so tags are computed one at a time.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        name: Compute version
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != push ] || [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A version tag already on this commit wins (lets you cut v1.0.0 by hand).
+          v=$(git tag --points-at HEAD -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          if [ -z "$v" ]; then
+            last=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+            if [ -z "$last" ]; then
+              v=v0.1.0
+            else
+              IFS=. read -r major minor patch <<< "${last#v}"
+              v="v$major.$minor.$((patch + 1))"
+            fi
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Version: $v"
+
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - run: go test ./...
+
+  build:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      CGO_ENABLED: "0"
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build and package
+        run: |
+          name="dreiecki-$VERSION-$GOOS-$GOARCH"
+          bin=dreiecki
+          [ "$GOOS" = windows ] && bin=dreiecki.exe
+          mkdir -p "dist/$name"
+          go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "dist/$name/$bin" .
+          cp README.md "dist/$name/"
+          cd dist
+          if [ "$GOOS" = windows ]; then
+            zip -qr "$name.zip" "$name"
+          else
+            tar -czf "$name.tar.gz" "$name"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [version, check, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+          gh release create "$VERSION" * \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
+            --generate-notes

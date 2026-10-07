@@ -24,6 +24,9 @@ import (
 //go:embed viewer.html
 var viewerHTML string
 
+// version is set at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
 const worktreeRef = "WORKTREE"
 
 func usage() {
@@ -53,9 +56,15 @@ func main() {
 		themeFlag = flag.String("theme", "", "KiCad color theme to render with")
 		noSheet   = flag.Bool("no-drawing-sheet", false, "omit the drawing sheet / title block from the renders")
 		keepTmp   = flag.Bool("keep-temp", false, "keep the temporary render directory")
+		verFlag   = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Usage = usage
 	flag.Parse()
+
+	if *verFlag {
+		fmt.Println("dreiecki", version)
+		return
+	}
 
 	refA, refB, err := parseRefs(flag.Args())
 	if err != nil {
