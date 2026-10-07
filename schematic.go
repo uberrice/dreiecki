@@ -93,14 +93,19 @@ func (p *Project) loadAux(src Source) error {
 	}
 	// A drawing sheet may also live elsewhere in the repo.
 	if data, ok := p.Files[path.Join(dir, p.Name+".kicad_pro")]; ok {
-		var pro struct {
-			Schematic struct {
-				PageLayout string `json:"page_layout_descr_file"`
-			} `json:"schematic"`
+		type layout struct {
+			PageLayout string `json:"page_layout_descr_file"`
 		}
-		if json.Unmarshal(data, &pro) == nil && pro.Schematic.PageLayout != "" {
-			wks := strings.ReplaceAll(pro.Schematic.PageLayout, "${KIPRJMOD}", ".")
-			if !filepath.IsAbs(wks) {
+		var pro struct {
+			Schematic layout `json:"schematic"`
+			Pcbnew    layout `json:"pcbnew"`
+		}
+		if json.Unmarshal(data, &pro) == nil {
+			for _, wks := range []string{pro.Schematic.PageLayout, pro.Pcbnew.PageLayout} {
+				wks = strings.ReplaceAll(wks, "${KIPRJMOD}", ".")
+				if wks == "" || filepath.IsAbs(wks) {
+					continue
+				}
 				if rel, err := cleanRel(path.Join(dir, filepath.ToSlash(wks))); err == nil {
 					if data, err := src.ReadFile(rel); err == nil {
 						p.Files[rel] = data

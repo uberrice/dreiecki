@@ -26,9 +26,24 @@ type Component struct {
 	FieldPos  string // serialized positions of all fields, for detecting cosmetic moves
 	Flags     map[string]string
 	LibDef    string // serialized embedded library symbol, for detecting symbol updates
+
+	// PCB footprints only.
+	Footprint bool
+	Pads      map[string]string // pad number -> net name
+	PadOrder  []string
+	Box       *Box     // outline estimate; symbols use a fixed radius around the anchor
+	Layers    []string // board layers the footprint draws on
 }
 
-func (c *Component) IsPower() bool { return strings.HasPrefix(c.Ref, "#") }
+func (c *Component) IsPower() bool { return !c.Footprint && strings.HasPrefix(c.Ref, "#") }
+
+func (c *Component) box() *Box {
+	if c.Box != nil {
+		b := *c.Box
+		return &b
+	}
+	return pointBox(c.X, c.Y, symbolRadius)
+}
 
 // Item is any other schematic object (wire, label, junction, text, ...).
 type Item struct {
@@ -39,6 +54,27 @@ type Item struct {
 	Geom    string // geometry part of the content
 	Rest    string // non-geometry part of the content
 	Box     Box
+
+	// Optional overrides, set for PCB items.
+	Category string
+	Title    string
+	Desc     string            // position description for added/removed items
+	Attrs    map[string]string // named properties reported individually when they change
+	Layers   []string
+}
+
+func (it *Item) category() string {
+	if it.Category != "" {
+		return it.Category
+	}
+	return itemCategory(it.Kind)
+}
+
+func (it *Item) title() string {
+	if it.Title != "" {
+		return it.Title
+	}
+	return itemTitle(it)
 }
 
 // SheetContent holds the extracted objects of one sheet instance.

@@ -8,13 +8,15 @@ import (
 
 // Change is one semantic difference shown in the report's change list.
 type Change struct {
-	Category string   `json:"category"` // component, power, label, wire, junction, text, sheet, graphic, other
+	Category string   `json:"category"` // component, power, label, wire, junction, text, sheet, graphic; for PCBs footprint, track, via, zone, net, board
 	Op       string   `json:"op"`       // added, removed, changed, moved
 	Title    string   `json:"title"`
 	Subtitle string   `json:"subtitle,omitempty"`
 	Details  []string `json:"details,omitempty"`
 	BoxA     *Box     `json:"boxA,omitempty"`
 	BoxB     *Box     `json:"boxB,omitempty"`
+
+	layers []string // PCB layers the change touches, for per-layer pages
 }
 
 const symbolRadius = 6.0
@@ -60,14 +62,14 @@ func diffComponents(a, b []*Component) []Change {
 	for _, ca := range removed {
 		changes = append(changes, Change{
 			Category: componentCategory(ca), Op: "removed", Title: refTitle(ca),
-			Subtitle: componentSubtitle(ca), BoxA: pointBox(ca.X, ca.Y, symbolRadius),
+			Subtitle: componentSubtitle(ca), BoxA: ca.box(), layers: ca.Layers,
 		})
 	}
 	for _, cb := range b {
 		if !matchedB[cb] {
 			changes = append(changes, Change{
 				Category: componentCategory(cb), Op: "added", Title: refTitle(cb),
-				Subtitle: componentSubtitle(cb), BoxB: pointBox(cb.X, cb.Y, symbolRadius),
+				Subtitle: componentSubtitle(cb), BoxB: cb.box(), layers: cb.Layers,
 			})
 		}
 	}
@@ -80,10 +82,14 @@ func compareComponent(a, b *Component) (Change, bool) {
 	if a.Ref != b.Ref {
 		details = append(details, fmt.Sprintf("Reference: %s → %s", a.Ref, b.Ref))
 	}
+	kind, def := "Symbol", "Library symbol definition updated (pins/graphics)"
+	if a.Footprint {
+		kind, def = "Footprint", "Footprint geometry changed (pads/graphics)"
+	}
 	if a.LibID != b.LibID {
-		details = append(details, fmt.Sprintf("Symbol: %s → %s", a.LibID, b.LibID))
+		details = append(details, fmt.Sprintf("%s: %s → %s", kind, a.LibID, b.LibID))
 	} else if a.LibDef != b.LibDef && a.LibDef != "" && b.LibDef != "" {
-		details = append(details, "Library symbol definition updated (pins/graphics)")
+		details = append(details, def)
 	}
 	if a.Unit != b.Unit {
 		details = append(details, fmt.Sprintf("Unit: %s → %s", a.Unit, b.Unit))
@@ -106,6 +112,23 @@ func compareComponent(a, b *Component) (Change, bool) {
 			details = append(details, fmt.Sprintf("%s added: %q", k, vb))
 		case va != vb:
 			details = append(details, fmt.Sprintf("%s: %s → %s", k, quoteEmpty(va), quoteEmpty(vb)))
+		}
+	}
+	seen = map[string]bool{}
+	for _, k := range append(append([]string{}, a.PadOrder...), b.PadOrder...) {
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		na, okA := a.Pads[k]
+		nb, okB := b.Pads[k]
+		switch {
+		case okA && !okB:
+			details = append(details, fmt.Sprintf("Pad %s removed (net %s)", k, quoteEmpty(na)))
+		case !okA && okB:
+			details = append(details, fmt.Sprintf("Pad %s added (net %s)", k, quoteEmpty(nb)))
+		case na != nb:
+			details = append(details, fmt.Sprintf("Pad %s net: %s → %s", k, quoteEmpty(na), quoteEmpty(nb)))
 		}
 	}
 	for _, k := range sortedKeys(mergeKeys(a.Flags, b.Flags)) {
@@ -139,7 +162,7 @@ func compareComponent(a, b *Component) (Change, bool) {
 	}
 	return Change{
 		Category: componentCategory(b), Op: op, Title: refTitle(b), Subtitle: componentSubtitle(b),
-		Details: details, BoxA: pointBox(a.X, a.Y, symbolRadius), BoxB: pointBox(b.X, b.Y, symbolRadius),
+		Details: details, BoxA: a.box(), BoxB: b.box(), layers: union(a.Layers, b.Layers),
 	}, true
 }
 
@@ -173,6 +196,11 @@ func diffItems(a, b []*Item) []Change {
 		if ia.Text != ib.Text {
 			details = append(details, fmt.Sprintf("Text: %q → %q", ia.Text, ib.Text))
 		}
+		for _, k := range sortedKeys(mergeKeys(ia.Attrs, ib.Attrs)) {
+			if ia.Attrs[k] != ib.Attrs[k] {
+				details = append(details, fmt.Sprintf("%s: %s → %s", k, quoteEmpty(ia.Attrs[k]), quoteEmpty(ib.Attrs[k])))
+			}
+		}
 		if ia.Geom != ib.Geom {
 			details = append(details, "Geometry: "+describeGeom(ia)+" → "+describeGeom(ib))
 			if ia.Text == ib.Text && ia.Rest == ib.Rest {
@@ -184,8 +212,8 @@ func diffItems(a, b []*Item) []Change {
 		}
 		boxA, boxB := ia.Box, ib.Box
 		changes = append(changes, Change{
-			Category: itemCategory(ib.Kind), Op: op, Title: itemTitle(ib), Details: details,
-			BoxA: &boxA, BoxB: &boxB,
+			Category: ib.category(), Op: op, Title: ib.title(), Details: details,
+			BoxA: &boxA, BoxB: &boxB, layers: union(ia.Layers, ib.Layers),
 		})
 	}
 	for _, ia := range leftoverA {
@@ -205,16 +233,16 @@ func diffItems(a, b []*Item) []Change {
 		}
 		box := ia.Box
 		changes = append(changes, Change{
-			Category: itemCategory(ia.Kind), Op: "removed", Title: itemTitle(ia),
-			Subtitle: describeGeom(ia), BoxA: &box,
+			Category: ia.category(), Op: "removed", Title: ia.title(),
+			Subtitle: describeGeom(ia), BoxA: &box, layers: ia.Layers,
 		})
 	}
 	for _, ib := range b {
 		if !matchedB[ib] {
 			box := ib.Box
 			changes = append(changes, Change{
-				Category: itemCategory(ib.Kind), Op: "added", Title: itemTitle(ib),
-				Subtitle: describeGeom(ib), BoxB: &box,
+				Category: ib.category(), Op: "added", Title: ib.title(),
+				Subtitle: describeGeom(ib), BoxB: &box, layers: ib.Layers,
 			})
 		}
 	}
@@ -222,6 +250,9 @@ func diffItems(a, b []*Item) []Change {
 }
 
 func describeGeom(it *Item) string {
+	if it.Desc != "" {
+		return it.Desc
+	}
 	b := it.Box
 	switch it.Kind {
 	case "wire", "bus":
@@ -268,6 +299,9 @@ func itemTitle(it *Item) string {
 }
 
 func componentCategory(c *Component) string {
+	if c.Footprint {
+		return "footprint"
+	}
 	if c.IsPower() {
 		return "power"
 	}
@@ -303,6 +337,19 @@ func quoteEmpty(s string) string {
 	return s
 }
 
+// union returns the elements of a and b without duplicates, in order.
+func union(a, b []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, s := range append(append([]string{}, a...), b...) {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func mergeKeys(a, b map[string]string) map[string]string {
 	m := map[string]string{}
 	for k := range a {
@@ -315,7 +362,8 @@ func mergeKeys(a, b map[string]string) map[string]string {
 }
 
 var opOrder = map[string]int{"removed": 0, "added": 1, "changed": 2, "moved": 3}
-var catOrder = map[string]int{"component": 0, "sheet": 1, "label": 2, "wire": 3, "junction": 4, "power": 5, "text": 6, "graphic": 7}
+var catOrder = map[string]int{"component": 0, "sheet": 1, "label": 2, "wire": 3, "junction": 4, "power": 5, "text": 6, "graphic": 7,
+	"footprint": 0, "zone": 2, "track": 3, "via": 4, "net": 8, "board": 9}
 
 func sortChanges(cs []Change) {
 	sort.SliceStable(cs, func(i, j int) bool {
@@ -323,7 +371,7 @@ func sortChanges(cs []Change) {
 		if catOrder[a.Category] != catOrder[b.Category] {
 			return catOrder[a.Category] < catOrder[b.Category]
 		}
-		if a.Category == "component" && a.Title != b.Title {
+		if (a.Category == "component" || a.Category == "footprint") && a.Title != b.Title {
 			return refLess(a.Title, b.Title)
 		}
 		if opOrder[a.Op] != opOrder[b.Op] {

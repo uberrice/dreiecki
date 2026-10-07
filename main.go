@@ -1,4 +1,4 @@
-// Command dreiecki renders two git revisions of a KiCad schematic and
+// Command dreiecki renders two git revisions of a KiCad schematic or board and
 // writes a self-contained, interactive HTML diff viewer.
 package main
 
@@ -33,14 +33,15 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `Usage: dreiecki [flags] <rev-a> [<rev-b>]
        dreiecki [flags] <rev-a>..<rev-b>
 
-Compares the KiCad schematic at two git revisions and writes an interactive
-HTML report. If <rev-b> is omitted, the working tree is used (also available
-explicitly as %s).
+Compares the KiCad schematic (or, with -pcb, the board) at two git revisions
+and writes an interactive HTML report. If <rev-b> is omitted, the working tree
+is used (also available explicitly as %s).
 
 Examples:
   dreiecki HEAD~1               # last commit vs. uncommitted changes
   dreiecki main feature-branch  # two branches
   dreiecki v7..v8 -o rev.html
+  dreiecki -pcb HEAD~1          # board instead of schematic
 
 Flags:
 `, worktreeRef)
@@ -49,8 +50,9 @@ Flags:
 
 func main() {
 	var (
-		schFlag   = flag.String("s", "", "root `.kicad_sch` file (default: auto-detect from the .kicad_pro in the current directory or repo)")
-		outFlag   = flag.String("o", "", "output HTML `file` (default: dreiecki-<a>-<b>.html)")
+		schFlag   = flag.String("s", "", "root `.kicad_sch` file, or .kicad_pcb with -pcb (default: auto-detect from the .kicad_pro in the current directory or repo)")
+		pcbFlag   = flag.Bool("pcb", false, "compare the board (.kicad_pcb) instead of the schematic")
+		outFlag   = flag.String("o", "", "output HTML `file` (default: dreiecki-<a>-<b>.html, dreiecki-pcb-<a>-<b>.html with -pcb)")
 		openFlag  = flag.Bool("open", false, "open the report in the default browser")
 		cliFlag   = flag.String("kicad-cli", "", "path to kicad-cli (default: from PATH)")
 		themeFlag = flag.String("theme", "", "KiCad color theme to render with")
@@ -73,7 +75,8 @@ func main() {
 		os.Exit(2)
 	}
 	opt := RenderOptions{KicadCLI: *cliFlag, Theme: *themeFlag, ExcludeDrawSheet: *noSheet}
-	if err := run(refA, refB, *schFlag, *outFlag, *openFlag, *keepTmp, opt); err != nil {
+	pcb := *pcbFlag || strings.HasSuffix(*schFlag, ".kicad_pcb")
+	if err := run(refA, refB, *schFlag, *outFlag, pcb, *openFlag, *keepTmp, opt); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -101,7 +104,7 @@ func parseRefs(args []string) (string, string, error) {
 	return "", "", fmt.Errorf("expected one or two revisions")
 }
 
-func run(refA, refB, schPath, outPath string, open, keepTmp bool, opt RenderOptions) error {
+func run(refA, refB, rootPath, outPath string, pcb, open, keepTmp bool, opt RenderOptions) error {
 	if opt.KicadCLI == "" {
 		p, err := findKicadCLI()
 		if err != nil {
@@ -124,7 +127,11 @@ func run(refA, refB, schPath, outPath string, open, keepTmp bool, opt RenderOpti
 	if err != nil {
 		return err
 	}
-	rootRel, err := findRootSchematic(repo, cwd, schPath, srcB, srcA)
+	ext := ".kicad_sch"
+	if pcb {
+		ext = ".kicad_pcb"
+	}
+	rootRel, err := findRootFile(repo, cwd, rootPath, ext, srcB, srcA)
 	if err != nil {
 		return err
 	}
@@ -140,6 +147,49 @@ func run(refA, refB, schPath, outPath string, open, keepTmp bool, opt RenderOpti
 		defer os.RemoveAll(tmp)
 	}
 
+	var rep *Report
+	if pcb {
+		rep, err = comparePCB(srcA, srcB, rootRel, tmp, opt)
+	} else {
+		rep, err = compareSchematic(srcA, srcB, rootRel, tmp, opt)
+	}
+	if err != nil {
+		return err
+	}
+	rep.A, rep.B = srcA.Info(), srcB.Info()
+	rep.Root = rootRel
+	rep.Generated = time.Now().Format("2006-01-02 15:04")
+
+	if outPath == "" {
+		prefix := "dreiecki"
+		if pcb {
+			prefix += "-pcb"
+		}
+		outPath = fmt.Sprintf("%s-%s-%s.html", prefix, slug(rep.A), slug(rep.B))
+	}
+	if err := writeReport(rep, outPath); err != nil {
+		return err
+	}
+	total := 0
+	changedPages := 0
+	for _, p := range rep.Pages {
+		total += len(p.Changes)
+		if p.Status != "same" {
+			changedPages++
+		}
+	}
+	if pcb && len(rep.Pages) > 0 {
+		total = len(rep.Pages[0].Changes) // the overview lists every change
+	}
+	fmt.Fprintf(os.Stderr, "%d %s(s), %d with differences, %d object change(s)\nWrote %s\n",
+		len(rep.Pages), map[bool]string{false: "sheet", true: "page"}[pcb], changedPages, total, outPath)
+	if open {
+		openBrowser(outPath)
+	}
+	return nil
+}
+
+func compareSchematic(srcA, srcB Source, rootRel, tmp string, opt RenderOptions) (*Report, error) {
 	type side struct {
 		proj  *Project
 		pages map[string]*RenderedPage
@@ -166,35 +216,42 @@ func run(refA, refB, schPath, outPath string, open, keepTmp bool, opt RenderOpti
 	wg.Wait()
 	for _, s := range sides {
 		if s.err != nil {
-			return s.err
+			return nil, s.err
 		}
 	}
+	return buildReport(sides[0].proj, sides[1].proj, sides[0].pages, sides[1].pages), nil
+}
 
-	rep := buildReport(sides[0].proj, sides[1].proj, sides[0].pages, sides[1].pages)
-	rep.A, rep.B = srcA.Info(), srcB.Info()
-	rep.Root = rootRel
-	rep.Generated = time.Now().Format("2006-01-02 15:04")
-
-	if outPath == "" {
-		outPath = fmt.Sprintf("dreiecki-%s-%s.html", slug(rep.A), slug(rep.B))
+func comparePCB(srcA, srcB Source, rootRel, tmp string, opt RenderOptions) (*Report, error) {
+	boards := make([]*Board, 2)
+	for i, src := range []Source{srcA, srcB} {
+		b, err := LoadBoard(src, rootRel)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", src.Info().Label, err)
+		}
+		boards[i] = b
 	}
-	if err := writeReport(rep, outPath); err != nil {
-		return err
+	pages := planPages(boards[0], boards[1])
+	renders := make([]map[string]*RenderedPage, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i, src := range []Source{srcA, srcB} {
+		wg.Add(1)
+		go func(i int, src Source) {
+			defer wg.Done()
+			renders[i], errs[i] = RenderPCB(boards[i], pages, filepath.Join(tmp, fmt.Sprint("ab"[i:i+1])), opt)
+			if errs[i] != nil {
+				errs[i] = fmt.Errorf("%s: %w", src.Info().Label, errs[i])
+			}
+		}(i, src)
 	}
-	total := 0
-	changedPages := 0
-	for _, p := range rep.Pages {
-		total += len(p.Changes)
-		if p.Status != "same" {
-			changedPages++
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
 		}
 	}
-	fmt.Fprintf(os.Stderr, "%d sheet(s), %d with differences, %d object change(s)\nWrote %s\n",
-		len(rep.Pages), changedPages, total, outPath)
-	if open {
-		openBrowser(outPath)
-	}
-	return nil
+	return buildPCBReport(boards[0], boards[1], pages, renders[0], renders[1]), nil
 }
 
 func makeSource(repo, ref string) (Source, error) {
@@ -225,8 +282,8 @@ func findKicadCLI() (string, error) {
 	return "", fmt.Errorf("kicad-cli not found; install KiCad 8+ or pass -kicad-cli")
 }
 
-// findRootSchematic resolves the root schematic as a repo-relative path.
-func findRootSchematic(repo, cwd, explicit string, srcs ...Source) (string, error) {
+// findRootFile resolves the root schematic or board (by ext) as a repo-relative path.
+func findRootFile(repo, cwd, explicit, ext string, srcs ...Source) (string, error) {
 	toRel := func(p string) (string, error) {
 		abs, err := filepath.Abs(p)
 		if err != nil {
@@ -247,14 +304,16 @@ func findRootSchematic(repo, cwd, explicit string, srcs ...Source) (string, erro
 		return cleanRel(filepath.ToSlash(rel))
 	}
 	if explicit != "" {
-		if strings.HasSuffix(explicit, ".kicad_pro") {
-			explicit = strings.TrimSuffix(explicit, ".kicad_pro") + ".kicad_sch"
+		for _, e := range []string{".kicad_pro", ".kicad_sch", ".kicad_pcb"} {
+			if strings.HasSuffix(explicit, e) {
+				explicit = strings.TrimSuffix(explicit, e) + ext
+			}
 		}
 		return toRel(explicit)
 	}
 	// A project file in the current directory.
 	if pros, _ := filepath.Glob(filepath.Join(cwd, "*.kicad_pro")); len(pros) == 1 {
-		return toRel(strings.TrimSuffix(pros[0], ".kicad_pro") + ".kicad_sch")
+		return toRel(strings.TrimSuffix(pros[0], ".kicad_pro") + ext)
 	}
 	// Otherwise exactly one project in the repo at either revision.
 	for _, src := range srcs {
@@ -271,7 +330,7 @@ func findRootSchematic(repo, cwd, explicit string, srcs ...Source) (string, erro
 			for _, n := range names {
 				rel := path.Join(dir, n)
 				if strings.HasSuffix(n, ".kicad_pro") {
-					found = append(found, strings.TrimSuffix(rel, ".kicad_pro")+".kicad_sch")
+					found = append(found, strings.TrimSuffix(rel, ".kicad_pro")+ext)
 				} else if !strings.HasPrefix(n, ".") && !strings.Contains(n, ".") {
 					walk(rel, depth+1)
 				}
@@ -286,11 +345,12 @@ func findRootSchematic(repo, cwd, explicit string, srcs ...Source) (string, erro
 				strings.Join(found, ", "))
 		}
 	}
-	return "", fmt.Errorf("no .kicad_pro found; pass the root schematic with -s")
+	return "", fmt.Errorf("no .kicad_pro found; pass the %s file with -s", ext)
 }
 
 // Report is the data embedded into the HTML viewer.
 type Report struct {
+	Kind      string       `json:"kind"` // sch or pcb
 	A         RevInfo      `json:"a"`
 	B         RevInfo      `json:"b"`
 	Root      string       `json:"root"`
@@ -312,7 +372,7 @@ type PageReport struct {
 }
 
 func buildReport(pa, pb *Project, ra, rb map[string]*RenderedPage) *Report {
-	rep := &Report{}
+	rep := &Report{Kind: "sch"}
 	// Pair sheet instances by uuid path, then by name path.
 	matchA := map[*SheetInst]*SheetInst{}
 	usedA := map[*SheetInst]bool{}
@@ -415,6 +475,9 @@ func writeReport(rep *Report, out string) error {
 		return err
 	}
 	title := fmt.Sprintf("Schematic diff: %s → %s", rep.A.Label, rep.B.Label)
+	if rep.Kind == "pcb" {
+		title = fmt.Sprintf("PCB diff: %s → %s", rep.A.Label, rep.B.Label)
+	}
 	html := strings.Replace(viewerHTML, "/*__DATA__*/null", string(data), 1)
 	html = strings.Replace(html, "<title>Schematic diff</title>", "<title>"+escapeHTML(title)+"</title>", 1)
 	return os.WriteFile(out, []byte(html), 0o644)

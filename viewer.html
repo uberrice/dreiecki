@@ -143,7 +143,7 @@ aside h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; co
 </header>
 <main>
   <aside>
-    <h2>Sheets</h2>
+    <h2 id="pagesHead">Sheets</h2>
     <ul id="pages"></ul>
     <h2 id="chHead">Changes</h2>
     <div class="filters" id="filters"></div>
@@ -161,7 +161,7 @@ aside h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; co
         <tr><td><kbd>1</kbd>–<kbd>6</kbd></td><td>A · B · Diff · Swipe · Side by side · Blink</td></tr>
         <tr><td><kbd>Space</kbd></td><td>Flip between A and B</td></tr>
         <tr><td><kbd>n</kbd> / <kbd>p</kbd></td><td>Next / previous differing area</td></tr>
-        <tr><td><kbd>j</kbd> / <kbd>k</kbd></td><td>Next / previous sheet</td></tr>
+        <tr><td><kbd>j</kbd> / <kbd>k</kbd></td><td>Next / previous <span class="unit">sheet</span></td></tr>
         <tr><td><kbd>f</kbd></td><td>Fit page</td></tr>
         <tr><td><kbd>h</kbd></td><td>Toggle outlines</td></tr>
         <tr><td><kbd>+</kbd> / <kbd>-</kbd></td><td>Zoom</td></tr>
@@ -289,16 +289,21 @@ const el = (tag, attrs = {}, ...kids) => {
   return e;
 };
 
-const CATS = { component: "Components", sheet: "Sheets", label: "Labels", wire: "Wires", junction: "Junctions / NC", power: "Power symbols", text: "Text", graphic: "Graphics" };
+const PCB = DATA.kind === "pcb", UNIT = PCB ? "layer" : "sheet";
+const CATS = PCB ?
+  { footprint: "Footprints", zone: "Zones", track: "Tracks", via: "Vias", text: "Text", graphic: "Graphics", net: "Nets", board: "Board" } :
+  { component: "Components", sheet: "Sheets", label: "Labels", wire: "Wires", junction: "Junctions / NC", power: "Power symbols", text: "Text", graphic: "Graphics" };
 const OPS = { removed: "−", added: "+", changed: "~", moved: "↔" };
 const prefs = (() => { try { return JSON.parse(localStorage.getItem("dreiecki") || "{}"); } catch { return {}; } })();
 const savePrefs = () => { try { localStorage.setItem("dreiecki", JSON.stringify(prefs)); } catch {} };
 const DEBUG = /(^|[#&])debug\b/.test(location.hash);
 
+// KiCad's board colours are made for a dark background, so PCB reports start on dark paper.
+const PAPER_PREF = PCB ? "darkPaperPcb" : "darkPaper";
 const state = {
-  page: 0, mode: prefs.mode || "diff", boxes: prefs.boxes !== false, darkPaper: !!prefs.darkPaper,
+  page: 0, mode: prefs.mode || "diff", boxes: prefs.boxes !== false, darkPaper: prefs[PAPER_PREF] ?? PCB,
   view: { s: 1, tx: 0, ty: 0 }, swipe: 0.5, region: -1, focus: null, selected: null,
-  filters: Object.assign({ component: true, sheet: true, label: true, wire: true, junction: true, power: true, text: true, graphic: true }, prefs.filters || {}),
+  filters: Object.assign(Object.fromEntries(Object.keys(CATS).map((k) => [k, true])), prefs.filters || {}),
   blinkSide: "a", blinkTimer: null,
 };
 
@@ -716,7 +721,7 @@ function renderChanges() {
   box.replaceChildren();
   const shown = p.changes.filter((c) => state.filters[c.category]);
   if (!p.changes.length) {
-    box.append(el("div", { class: "empty" }, p.status === "same" ? "No differences on this sheet." :
+    box.append(el("div", { class: "empty" }, p.status === "same" ? `No differences on this ${UNIT}.` :
       "No object-level changes; see highlighted areas for visual differences (e.g. title block)."));
     return;
   }
@@ -757,7 +762,7 @@ $("#prevReg").onclick = () => gotoRegion(-1);
 $("#nextReg").onclick = () => gotoRegion(1);
 $("#fitBtn").onclick = () => fit();
 $("#boxesBtn").onclick = () => toggleBoxes();
-$("#paperBtn").onclick = () => { state.darkPaper = !state.darkPaper; prefs.darkPaper = state.darkPaper; savePrefs(); applyPaper(); };
+$("#paperBtn").onclick = () => { state.darkPaper = !state.darkPaper; prefs[PAPER_PREF] = state.darkPaper; savePrefs(); applyPaper(); };
 $("#helpBtn").onclick = () => $("#help").classList.toggle("on");
 $("#help").onclick = () => $("#help").classList.remove("on");
 function toggleBoxes() { state.boxes = !state.boxes; prefs.boxes = state.boxes; savePrefs(); $("#boxesBtn").classList.toggle("on", state.boxes); requestDraw(); }
@@ -789,14 +794,17 @@ function renderHeader() {
   };
   fill($("#revA"), "A", DATA.a); fill($("#revB"), "B", DATA.b);
   $("#boxesBtn").classList.toggle("on", state.boxes);
+  $("#paperBtn").classList.toggle("on", state.darkPaper);
+  $("#pagesHead").textContent = PCB ? "Layers" : "Sheets";
+  for (const u of document.querySelectorAll(".unit")) u.textContent = UNIT;
 }
 
 renderHeader();
-// Optional deep link: #mode=swipe&sheet=/power&area=2
+// Optional deep link: #mode=swipe&sheet=/power&area=2 (layer=F.Cu for boards)
 (async () => {
   const q = new URLSearchParams(location.hash.slice(1));
   if (["a", "b", "diff", "swipe", "side", "blink"].includes(q.get("mode"))) state.mode = q.get("mode");
-  let start = DATA.pages.findIndex((p) => p.name === q.get("sheet"));
+  let start = DATA.pages.findIndex((p) => p.name === (q.get("sheet") ?? q.get("layer")));
   if (start < 0) start = Math.max(0, DATA.pages.findIndex((p) => p.status !== "same")); // first sheet that differs
   await selectPage(start);
   for (let n = +q.get("area") || 0; n > 0; n--) gotoRegion(1);
