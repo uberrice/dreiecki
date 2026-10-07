@@ -1,0 +1,806 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Schematic diff</title>
+<style>
+:root {
+  --bg: #f4f4f2; --panel: #ffffff; --panel-2: #f0efeb; --border: #dcdad3;
+  --text: #1f2328; --muted: #6a6f76; --accent: #2f6fde;
+  --rem: #d1243f; --add: #138a4b; --chg: #b7791f; --mov: #6b5fd3;
+  --rem-bg: #fde7ea; --add-bg: #e3f5ea; --chg-bg: #fbf0dc; --mov-bg: #ecebfb;
+  --paper: #f5f4ef; --canvas: #d9d8d3;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181c; --panel: #1e2126; --panel-2: #262a30; --border: #343941;
+    --text: #e6e8eb; --muted: #969ca5; --accent: #6b9cff;
+    --rem: #ff6b81; --add: #4cd38a; --chg: #f0b453; --mov: #a99cff;
+    --rem-bg: #3a1f26; --add-bg: #19352a; --chg-bg: #3a2f1b; --mov-bg: #2a2742;
+    --canvas: #0f1113;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  display: grid; grid-template-rows: auto 1fr; overflow: hidden;
+}
+button { font: inherit; color: inherit; }
+header {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
+  padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--border);
+}
+.revs { display: flex; gap: 8px; align-items: center; min-width: 0; flex: 1 1 380px; }
+.rev { display: flex; align-items: baseline; gap: 6px; min-width: 0; padding: 3px 8px; border-radius: 6px; }
+.rev.a { background: var(--rem-bg); } .rev.b { background: var(--add-bg); }
+.rev .tag { font-weight: 700; }
+.rev.a .tag { color: var(--rem); } .rev.b .tag { color: var(--add); }
+.rev .lbl { font-weight: 600; white-space: nowrap; }
+.rev .sub { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.arrow { color: var(--muted); }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.seg button { border: 0; background: var(--panel); padding: 5px 10px; cursor: pointer; border-right: 1px solid var(--border); }
+.seg button:last-child { border-right: 0; }
+.seg button:hover { background: var(--panel-2); }
+.seg button.on { background: var(--accent); color: #fff; }
+.btn { border: 1px solid var(--border); background: var(--panel); border-radius: 7px; padding: 5px 9px; cursor: pointer; }
+.btn:hover { background: var(--panel-2); }
+.btn.on { border-color: var(--accent); color: var(--accent); }
+.regnav { display: inline-flex; align-items: center; gap: 4px; }
+.regnav span { color: var(--muted); min-width: 92px; text-align: center; font-variant-numeric: tabular-nums; }
+kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: var(--panel-2); }
+
+main { display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
+aside { background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+aside h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 12px 12px 6px; }
+#pages { list-style: none; margin: 0; padding: 0 6px; max-height: 32vh; overflow: auto; flex: none; }
+#pages li { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
+#pages li:hover { background: var(--panel-2); }
+#pages li.on { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
+#pages .pg { color: var(--muted); font-variant-numeric: tabular-nums; width: 1.6em; text-align: right; }
+#pages .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge { font-size: 11px; padding: 0 6px; border-radius: 9px; white-space: nowrap; }
+.badge.same { color: var(--muted); }
+.badge.changed { background: var(--chg-bg); color: var(--chg); }
+.badge.added { background: var(--add-bg); color: var(--add); }
+.badge.removed { background: var(--rem-bg); color: var(--rem); }
+.filters { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 12px 8px; }
+.chip { border: 1px solid var(--border); background: var(--panel); border-radius: 12px; padding: 1px 8px; font-size: 12px; cursor: pointer; color: var(--muted); }
+.chip.on { color: var(--text); background: var(--panel-2); }
+.chip .n { color: var(--muted); margin-left: 3px; }
+#changes { overflow: auto; flex: 1; padding: 0 6px 12px; min-height: 0; }
+.grp { font-size: 11px; color: var(--muted); margin: 10px 8px 4px; text-transform: uppercase; letter-spacing: .05em; }
+.ch { display: grid; grid-template-columns: 18px 1fr; gap: 0 6px; padding: 5px 8px; border-radius: 6px; cursor: pointer; }
+.ch:hover { background: var(--panel-2); }
+.ch.on { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
+.op { font-weight: 700; text-align: center; border-radius: 4px; line-height: 18px; height: 18px; font-size: 12px; }
+.op.removed { color: var(--rem); background: var(--rem-bg); }
+.op.added { color: var(--add); background: var(--add-bg); }
+.op.changed { color: var(--chg); background: var(--chg-bg); }
+.op.moved { color: var(--mov); background: var(--mov-bg); }
+.ch .t { font-weight: 600; overflow-wrap: anywhere; }
+.ch .s { color: var(--muted); font-weight: 400; margin-left: 4px; }
+.ch ul { grid-column: 2; margin: 2px 0 0; padding-left: 14px; color: var(--muted); }
+.ch li { overflow-wrap: anywhere; }
+.empty { color: var(--muted); padding: 8px 12px; }
+
+#viewer { position: relative; overflow: hidden; background: var(--canvas); display: flex; min-width: 0; touch-action: none; }
+.pane { position: relative; flex: 1; overflow: hidden; cursor: grab; min-width: 0; }
+.pane.drag { cursor: grabbing; }
+.pane + .pane { border-left: 2px solid var(--border); }
+.pane canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.panelbl { position: absolute; top: 8px; left: 8px; font-weight: 700; padding: 2px 8px; border-radius: 5px; pointer-events: none; z-index: 2; }
+.panelbl.a { background: var(--rem-bg); color: var(--rem); }
+.panelbl.b { background: var(--add-bg); color: var(--add); }
+.panelbl.r { left: auto; right: 8px; }
+#swipe { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px solid var(--accent); z-index: 3; cursor: ew-resize; display: none; }
+#swipe::after { content: "⇔"; position: absolute; top: 50%; left: -15px; width: 28px; height: 28px; margin-top: -14px; border-radius: 50%; background: var(--accent); color: #fff; display: grid; place-items: center; font-size: 14px; }
+#swipe::before { content: ""; position: absolute; top: 0; bottom: 0; left: -10px; width: 20px; }
+#status { position: absolute; right: 10px; bottom: 8px; color: var(--muted); font-size: 12px; background: var(--panel); padding: 2px 8px; border-radius: 5px; border: 1px solid var(--border); pointer-events: none; z-index: 3; }
+#help { position: absolute; inset: 0; display: none; place-items: center; background: rgba(0,0,0,.35); z-index: 10; }
+#help.on { display: grid; }
+#help div { background: var(--panel); border-radius: 10px; padding: 16px 20px; max-width: 420px; box-shadow: 0 8px 30px rgba(0,0,0,.3); }
+#help table { border-collapse: collapse; }
+#help td { padding: 3px 10px 3px 0; }
+.legend { display: inline-flex; gap: 10px; color: var(--muted); font-size: 12px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+
+@media (max-width: 760px) {
+  main { grid-template-columns: 1fr; grid-template-rows: 1fr 40vh; }
+  aside { order: 2; border-right: 0; border-top: 1px solid var(--border); }
+  #pages { max-height: 20vh; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="revs">
+    <div class="rev a" id="revA"></div>
+    <span class="arrow">→</span>
+    <div class="rev b" id="revB"></div>
+  </div>
+  <div class="toolbar">
+    <div class="seg" id="modes">
+      <button data-mode="a" title="Old revision (1)">A</button>
+      <button data-mode="b" title="New revision (2)">B</button>
+      <button data-mode="diff" title="Highlight differences (3)">Diff</button>
+      <button data-mode="swipe" title="Swipe between A and B (4)">Swipe</button>
+      <button data-mode="side" title="Side by side, synced (5)">Side by side</button>
+      <button data-mode="blink" title="Alternate A and B (6)">Blink</button>
+    </div>
+    <div class="regnav" title="Jump between areas that differ visually (n / p)">
+      <button class="btn" id="prevReg">◀</button><span id="regInfo">–</span><button class="btn" id="nextReg">▶</button>
+    </div>
+    <button class="btn on" id="boxesBtn" title="Outline differing areas (h)">Outlines</button>
+    <button class="btn" id="fitBtn" title="Fit page (f)">Fit</button>
+    <button class="btn" id="paperBtn" title="Toggle light/dark paper (for dark KiCad themes)">Paper</button>
+    <button class="btn" id="helpBtn" title="Keyboard shortcuts (?)">?</button>
+  </div>
+</header>
+<main>
+  <aside>
+    <h2>Sheets</h2>
+    <ul id="pages"></ul>
+    <h2 id="chHead">Changes</h2>
+    <div class="filters" id="filters"></div>
+    <div id="changes"></div>
+  </aside>
+  <section id="viewer">
+    <div class="pane" id="paneL"><canvas></canvas><div class="panelbl" id="lblL"></div></div>
+    <div class="pane" id="paneR" hidden><canvas></canvas><div class="panelbl b">B</div></div>
+    <div class="panelbl b r" id="lblSwipe" hidden>B</div>
+    <div id="swipe"></div>
+    <div id="status"></div>
+    <div id="help"><div>
+      <h3 style="margin-top:0">Keyboard</h3>
+      <table>
+        <tr><td><kbd>1</kbd>–<kbd>6</kbd></td><td>A · B · Diff · Swipe · Side by side · Blink</td></tr>
+        <tr><td><kbd>Space</kbd></td><td>Flip between A and B</td></tr>
+        <tr><td><kbd>n</kbd> / <kbd>p</kbd></td><td>Next / previous differing area</td></tr>
+        <tr><td><kbd>j</kbd> / <kbd>k</kbd></td><td>Next / previous sheet</td></tr>
+        <tr><td><kbd>f</kbd></td><td>Fit page</td></tr>
+        <tr><td><kbd>h</kbd></td><td>Toggle outlines</td></tr>
+        <tr><td><kbd>+</kbd> / <kbd>-</kbd></td><td>Zoom</td></tr>
+        <tr><td>Wheel / drag</td><td>Zoom / pan</td></tr>
+      </table>
+      <p class="legend"><span><i style="background:var(--rem)"></i>only in A (removed)</span><span><i style="background:var(--add)"></i>only in B (added)</span></p>
+    </div></div>
+  </section>
+</main>
+<script id="pixcode">
+// Pixel routines. Plain functions so the same source runs in the page and in a Web Worker.
+const REM_RGB = [209, 36, 63], ADD_RGB = [19, 138, 75];
+
+function dilate(src, W, H, r) {
+  const tmp = new Uint8Array(W * H), out = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) {
+    const o = y * W; let cnt = 0;
+    for (let x = 0; x < Math.min(r, W); x++) cnt += src[o + x];
+    for (let x = 0; x < W; x++) {
+      if (x + r < W) cnt += src[o + x + r];
+      if (x - r - 1 >= 0) cnt -= src[o + x - r - 1];
+      tmp[o + x] = cnt > 0 ? 1 : 0;
+    }
+  }
+  for (let x = 0; x < W; x++) {
+    let cnt = 0;
+    for (let y = 0; y < Math.min(r, H); y++) cnt += tmp[y * W + x];
+    for (let y = 0; y < H; y++) {
+      if (y + r < H) cnt += tmp[(y + r) * W + x];
+      if (y - r - 1 >= 0) cnt -= tmp[(y - r - 1) * W + x];
+      out[y * W + x] = cnt > 0 ? 1 : 0;
+    }
+  }
+  return out;
+}
+
+// Group changed pixels into areas on a coarse grid, then measure exact pixel bounds (in mm).
+function findRegions(rem, add, W, H, R) {
+  const cell = Math.max(4, Math.round(2.5 * R));
+  const gw = Math.ceil(W / cell), gh = Math.ceil(H / cell), grid = new Uint8Array(gw * gh);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    if (rem[i] || add[i]) grid[((y / cell) | 0) * gw + ((x / cell) | 0)] = 1;
+  }
+  const label = new Int32Array(gw * gh).fill(-1), boxes = [];
+  for (let s = 0; s < grid.length; s++) {
+    if (!grid[s] || label[s] >= 0) continue;
+    const id = boxes.length, stack = [s]; label[s] = id;
+    boxes.push({ x1: Infinity, y1: Infinity, x2: -Infinity, y2: -Infinity });
+    while (stack.length) {
+      const c = stack.pop(), cx = c % gw, cy = (c / gw) | 0;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+        const nc = ny * gw + nx;
+        if (grid[nc] && label[nc] < 0) { label[nc] = id; stack.push(nc); }
+      }
+    }
+  }
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    if (!rem[i] && !add[i]) continue;
+    const b = boxes[label[((y / cell) | 0) * gw + ((x / cell) | 0)]];
+    if (x < b.x1) b.x1 = x; if (x > b.x2) b.x2 = x; if (y < b.y1) b.y1 = y; if (y > b.y2) b.y2 = y;
+  }
+  return boxes.map((b) => [b.x1 / R - 0.8, b.y1 / R - 0.8, (b.x2 + 1) / R + 0.8, (b.y2 + 1) / R + 0.8])
+    .sort((a, b) => (Math.round(a[1] / 20) - Math.round(b[1] / 20)) || (a[0] - b[0]));
+}
+
+// Composite a diff image from two renders: faint common ink, red removed ink, green added ink,
+// on a light wash around changed areas. wash maps output pixels to the analysis masks.
+function diffPixels(a, b, out, w, h, wash) {
+  const [rr, rg, rb] = REM_RGB, [ar, ag, ab_] = ADD_RGB;
+  for (let y = 0; y < h; y++) {
+    const wrow = wash.ys[y] * wash.W;
+    for (let x = 0; x < w; x++) {
+      const j = (y * w + x) * 4;
+      const aa = a[j + 3], ba = b[j + 3];
+      let rem = aa > ba ? aa - ba : 0, add = ba > aa ? ba - aa : 0, com = aa < ba ? aa : ba;
+      if (com > 60 && Math.abs(a[j] - b[j]) + Math.abs(a[j + 1] - b[j + 1]) + Math.abs(a[j + 2] - b[j + 2]) > 90) { add = ba; com = 0; }
+      let R = 0, G = 0, B = 0, A = 0, k;
+      const wi = wrow + wash.xs[x];
+      if (wash.rem[wi]) { k = 0.16; R = rr * k; G = rg * k; B = rb * k; A = k; }
+      if (wash.add[wi]) { k = 0.16; R = ar * k + R * (1 - k); G = ag * k + G * (1 - k); B = ab_ * k + B * (1 - k); A = k + A * (1 - k); }
+      if (com) {
+        k = (com / 255) * 0.25;
+        const s = ba ? b : a;
+        R = s[j] * k + R * (1 - k); G = s[j + 1] * k + G * (1 - k); B = s[j + 2] * k + B * (1 - k); A = k + A * (1 - k);
+      }
+      if (rem) { k = rem / 255; R = rr * k + R * (1 - k); G = rg * k + G * (1 - k); B = rb * k + B * (1 - k); A = k + A * (1 - k); }
+      if (add) { k = add / 255; R = ar * k + R * (1 - k); G = ag * k + G * (1 - k); B = ab_ * k + B * (1 - k); A = k + A * (1 - k); }
+      if (A > 0) { out[j] = R / A; out[j + 1] = G / A; out[j + 2] = B / A; out[j + 3] = A * 255; }
+    }
+  }
+}
+
+// Whole-page analysis at overview resolution: change masks, areas, and the diff overview image.
+function analyseBuffers({ a, b, W, H, R }) {
+  const n = W * H, rem = new Uint8Array(n), add = new Uint8Array(n);
+  let changed = 0;
+  for (let i = 0, j = 0; i < n; i++, j += 4) {
+    const ia = a[j + 3] > 60, ib = b[j + 3] > 60;
+    if (ia && !ib) { rem[i] = 1; changed++; }
+    else if (ib && !ia) { add[i] = 1; changed++; }
+    else if (ia && ib && Math.abs(a[j] - b[j]) + Math.abs(a[j + 1] - b[j + 1]) + Math.abs(a[j + 2] - b[j + 2]) > 90) { rem[i] = add[i] = 1; changed++; }
+  }
+  const regions = findRegions(rem, add, W, H, R);
+  const wr = Math.max(1, Math.round(0.8 * R));
+  const washRem = dilate(rem, W, H, wr), washAdd = dilate(add, W, H, wr);
+  const diff = new Uint8ClampedArray(n * 4);
+  const xs = new Int32Array(W).map((_, i) => i), ys = new Int32Array(H).map((_, i) => i);
+  diffPixels(a, b, diff, W, H, { rem: washRem, add: washAdd, W, xs, ys });
+  return { regions, washRem, washAdd, diff, changed };
+}
+</script>
+<script>
+const DATA = /*__DATA__*/null;
+const $ = (s) => document.querySelector(s);
+const el = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v; else if (k.startsWith("on")) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v);
+  }
+  for (const k of kids) if (k != null) e.append(k);
+  return e;
+};
+
+const CATS = { component: "Components", sheet: "Sheets", label: "Labels", wire: "Wires", junction: "Junctions / NC", power: "Power symbols", text: "Text", graphic: "Graphics" };
+const OPS = { removed: "−", added: "+", changed: "~", moved: "↔" };
+const prefs = (() => { try { return JSON.parse(localStorage.getItem("dreiecki") || "{}"); } catch { return {}; } })();
+const savePrefs = () => { try { localStorage.setItem("dreiecki", JSON.stringify(prefs)); } catch {} };
+const DEBUG = /(^|[#&])debug\b/.test(location.hash);
+
+const state = {
+  page: 0, mode: prefs.mode || "diff", boxes: prefs.boxes !== false, darkPaper: !!prefs.darkPaper,
+  view: { s: 1, tx: 0, ty: 0 }, swipe: 0.5, region: -1, focus: null, selected: null,
+  filters: Object.assign({ component: true, sheet: true, label: true, wire: true, junction: true, power: true, text: true, graphic: true }, prefs.filters || {}),
+  blinkSide: "a", blinkTimer: null,
+};
+
+// ---------- page loading and whole-page analysis ----------
+// Per page: decoded SVG images, low-res overview bitmaps (a, b, d) and analysis results.
+const rt = new Map();
+const KEEP_PAGES = 3;
+
+async function unpack(b64) {
+  if (!b64) return null;
+  const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const stream = new Blob([bin]).stream().pipeThrough(new DecompressionStream("gzip"));
+  const text = await new Response(stream).text();
+  return URL.createObjectURL(new Blob([text], { type: "image/svg+xml" }));
+}
+async function loadImg(url) {
+  if (!url) return null;
+  const i = new Image();
+  i.src = url;
+  try { await i.decode(); } catch { return null; }
+  return i;
+}
+// Draw an SVG (or nothing) into a w×h canvas, page origin at (-ox, -oy), sc px per mm.
+function rasterize(cv, ctx, img, page, sc, ox, oy) {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (img) ctx.drawImage(img, -ox, -oy, page.width * sc, page.height * sc);
+  const data = ctx.getImageData(0, 0, cv.width, cv.height).data;
+  return { bmp: cv.transferToImageBitmap(), data };
+}
+
+const pixSrc = document.getElementById("pixcode").textContent;
+let worker = null;
+try {
+  worker = new Worker(URL.createObjectURL(new Blob([pixSrc +
+    "\nonmessage = (e) => { const r = analyseBuffers(e.data); postMessage(Object.assign(r, { id: e.data.id }), [r.washRem.buffer, r.washAdd.buffer, r.diff.buffer]); };"],
+    { type: "text/javascript" })));
+} catch { worker = null; }
+const pending = new Map();
+let jobSeq = 0;
+if (worker) {
+  worker.onmessage = (e) => { const p = pending.get(e.data.id); pending.delete(e.data.id); p.resolve(e.data); };
+  worker.onerror = () => { // e.g. workers blocked: finish everything in the page instead
+    worker = null;
+    for (const [id, p] of pending) { pending.delete(id); p.resolve(analyseBuffers(p.msg)); }
+  };
+}
+function runAnalysis(msg) {
+  if (!worker) return Promise.resolve(analyseBuffers(msg));
+  return new Promise((resolve) => {
+    const id = ++jobSeq;
+    pending.set(id, { resolve, msg });
+    worker.postMessage(Object.assign({ id }, msg)); // copied, so the fallback still has the data
+  });
+}
+
+function loadPage(i) {
+  if (rt.has(i)) { const r = rt.get(i); rt.delete(i); rt.set(i, r); return r.ready; } // LRU touch
+  const r = { ov: null, an: null };
+  rt.set(i, r);
+  r.ready = (async () => {
+    const p = DATA.pages[i];
+    const [ua, ub] = await Promise.all([unpack(p.svgA), unpack(p.svgB)]);
+    [r.imgA, r.imgB] = await Promise.all([loadImg(ua), loadImg(ub)]);
+    const R = Math.min(6, 3000 / Math.max(p.width, p.height));
+    const W = Math.round(p.width * R), H = Math.round(p.height * R);
+    const cv = new OffscreenCanvas(W, H), ctx = cv.getContext("2d", { willReadFrequently: true });
+    const ra = rasterize(cv, ctx, r.imgA, p, R, 0, 0), rb = rasterize(cv, ctx, r.imgB, p, R, 0, 0);
+    r.ov = { a: ra.bmp, b: rb.bmp, d: null, R };
+    requestDraw();
+    const res = await runAnalysis({ a: ra.data, b: rb.data, W, H, R });
+    r.an = { R, W, H, washRem: res.washRem, washAdd: res.washAdd, regions: res.regions, changed: res.changed };
+    r.ov.d = await createImageBitmap(new ImageData(res.diff, W, H));
+    requestDraw();
+  })();
+  // Free memory of pages not looked at recently.
+  while (rt.size > KEEP_PAGES) {
+    const [old, ro] = rt.entries().next().value;
+    if (old === state.page) break;
+    rt.delete(old);
+    ro.ready.then(() => { for (const k of ["a", "b", "d"]) ro.ov && ro.ov[k] && ro.ov[k].close(); });
+    dropTiles(old);
+  }
+  return r.ready;
+}
+
+// ---------- tile cache ----------
+// Tiles are TILE device pixels square at 2^L px/mm; each holds A, B and diff bitmaps.
+const TILE = 512, MAX_TILES = 48, MAX_LEVEL = 8;
+const tiles = new Map();
+// Two scratch canvases: a GPU-friendly one for plain renders, a CPU one for pixel readback.
+const tileCv = new OffscreenCanvas(TILE, TILE), tileCtx = tileCv.getContext("2d", { willReadFrequently: true });
+const tileCv2 = new OffscreenCanvas(TILE, TILE), tileCtx2 = tileCv2.getContext("2d");
+let queue = [], lastInteract = 0;
+const stats = { rendered: 0, ms: 0 };
+
+function tileKey(i, L, x, y) { return `${i}|${L}|${x}|${y}`; }
+function closeTile(t) { for (const k of ["a", "b", "d"]) if (t[k]) t[k].close(); }
+function dropTiles(i) {
+  for (const [k, t] of tiles) if (k.startsWith(i + "|")) { closeTile(t); tiles.delete(k); }
+}
+// Fill in one kind ("a", "b" or "d") of a tile. The diff needs pixels of both sides.
+function renderTile(t, i, L, x, y, kind) {
+  const t0 = performance.now();
+  const p = DATA.pages[i], r = rt.get(i), sc = 2 ** L;
+  if (kind !== "d") {
+    tileCtx2.clearRect(0, 0, TILE, TILE);
+    const img = kind === "a" ? r.imgA : r.imgB;
+    if (img) tileCtx2.drawImage(img, -x * TILE, -y * TILE, p.width * sc, p.height * sc);
+    t[kind] = tileCv2.transferToImageBitmap();
+  } else {
+    const side = (k, img) => {
+      tileCtx.clearRect(0, 0, TILE, TILE);
+      if (t[k]) tileCtx.drawImage(t[k], 0, 0);
+      else if (img) tileCtx.drawImage(img, -x * TILE, -y * TILE, p.width * sc, p.height * sc);
+      return tileCtx.getImageData(0, 0, TILE, TILE).data;
+    };
+    const A = side("a", r.imgA), B = side("b", r.imgB), an = r.an;
+    const out = new ImageData(TILE, TILE);
+    const map = (px0, max) => {
+      const m = new Int32Array(TILE);
+      for (let k = 0; k < TILE; k++) m[k] = Math.min(max - 1, Math.max(0, Math.floor(((px0 + k + 0.5) / sc) * an.R)));
+      return m;
+    };
+    diffPixels(A, B, out.data, TILE, TILE, { rem: an.washRem, add: an.washAdd, W: an.W, xs: map(x * TILE, an.W), ys: map(y * TILE, an.H) });
+    tileCtx.putImageData(out, 0, 0);
+    t.d = tileCv.transferToImageBitmap();
+  }
+  stats.rendered++; stats.ms += performance.now() - t0;
+}
+function pumpTiles() {
+  if (!queue.length) return;
+  // Don't rasterize while the user is actively zooming/panning; coarser levels stand in.
+  if (performance.now() - lastInteract < 120) { setTimeout(requestDraw, 130); return; }
+  queue.sort((a, b) => a.prio - b.prio);
+  const t0 = performance.now();
+  let done = 0;
+  while (queue.length && (done === 0 || performance.now() - t0 < 12)) {
+    const q = queue.shift(), r = rt.get(q.page);
+    if (q.page !== state.page || !r || (q.kind === "d" && !r.an)) continue;
+    let t = tiles.get(q.key);
+    if (t && t[q.kind]) continue;
+    if (!t) tiles.set(q.key, (t = {}));
+    renderTile(t, q.page, q.L, q.x, q.y, q.kind);
+    done++;
+    while (tiles.size > MAX_TILES) {
+      const [k, old] = tiles.entries().next().value;
+      closeTile(old); tiles.delete(k);
+    }
+  }
+  if (done) requestDraw();
+}
+
+// ---------- drawing ----------
+const panes = [{ el: $("#paneL") }, { el: $("#paneR") }];
+for (const p of panes) { p.cv = p.el.querySelector("canvas"); p.ctx = p.cv.getContext("2d"); }
+let colors = {};
+function readColors() {
+  const cs = getComputedStyle(document.documentElement), g = (n) => cs.getPropertyValue(n).trim();
+  colors = { canvas: g("--canvas"), paper: g("--paper"), rem: g("--rem"), add: g("--add"), chg: g("--chg"), mov: g("--mov"), accent: g("--accent") };
+}
+readColors();
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readColors(); requestDraw(); });
+
+let frameReq = false;
+function requestDraw() { if (!frameReq) { frameReq = true; requestAnimationFrame(frame); } }
+function frame() {
+  frameReq = false;
+  queue = [];
+  draw();
+  pumpTiles();
+}
+function paneSize() { const r = panes[0].el.getBoundingClientRect(); return { w: r.width, h: r.height }; }
+
+function paneKinds(idx) {
+  const m = state.mode;
+  if (idx === 1) return ["b"];
+  if (m === "a" || m === "side") return ["a"];
+  if (m === "b") return ["b"];
+  if (m === "blink") return [state.blinkSide];
+  if (m === "swipe") return ["a", "b"];
+  return ["d"];
+}
+function draw() {
+  const p = DATA.pages[state.page], r = rt.get(state.page), v = state.view, dpr = devicePixelRatio || 1;
+  panes.forEach((pane, idx) => {
+    if (pane.el.hidden) return;
+    const cw = Math.round(pane.el.clientWidth * dpr), ch = Math.round(pane.el.clientHeight * dpr);
+    if (pane.cv.width !== cw || pane.cv.height !== ch) { pane.cv.width = cw; pane.cv.height = ch; }
+    const ctx = pane.ctx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = colors.canvas; ctx.fillRect(0, 0, cw, ch);
+    const S = v.s * dpr, X = v.tx * dpr, Y = v.ty * dpr; // device px per mm, page origin
+    ctx.save();
+    ctx.shadowColor = "rgba(0,0,0,.25)"; ctx.shadowBlur = 6 * dpr;
+    ctx.fillStyle = paperColor();
+    ctx.fillRect(X, Y, p.width * S, p.height * S);
+    ctx.restore();
+    if (!r || !r.ov) return;
+    const kinds = paneKinds(idx);
+    drawLayer(ctx, kinds[0], r, p, S, X, Y, cw, ch, 1);
+    if (kinds[1]) { // swipe: B to the right of the handle
+      const sx = Math.round(state.swipe * cw);
+      ctx.save(); ctx.beginPath(); ctx.rect(sx, 0, cw - sx, ch); ctx.clip();
+      ctx.fillStyle = paperColor();
+      const left = Math.max(X, sx), right = X + p.width * S;
+      if (right > left) ctx.fillRect(left, Y, right - left, p.height * S);
+      drawLayer(ctx, kinds[1], r, p, S, X, Y, cw, ch, 0);
+      ctx.restore();
+    }
+    drawOverlays(ctx, r, S, X, Y, dpr);
+  });
+  updateStatus();
+}
+function paperColor() { return state.darkPaper ? "#1c1f24" : colors.paper; }
+function drawLayer(ctx, kind, r, p, S, X, Y, cw, ch, prio) {
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "low";
+  if (kind === "d" && !r.ov.d) { // analysis still running
+    ctx.globalAlpha = 0.3; ctx.drawImage(r.ov.b || r.ov.a, X, Y, p.width * S, p.height * S); ctx.globalAlpha = 1;
+    return;
+  }
+  ctx.drawImage(r.ov[kind], X, Y, p.width * S, p.height * S);
+  if (S <= r.ov.R * 1.15 || (kind === "d" && !r.an)) return; // overview is sharp enough
+  const L = Math.min(MAX_LEVEL, Math.ceil(Math.log2(S)));
+  for (let l = Math.max(0, L - 3); l <= L; l++) drawTiles(ctx, kind, l, l === L, p, S, X, Y, cw, ch, prio);
+}
+function drawTiles(ctx, kind, L, want, p, S, X, Y, cw, ch, prio) {
+  const sc = 2 ** L, k = S / sc; // screen px per tile px
+  if (sc <= rt.get(state.page).ov.R) return;
+  const nx = Math.ceil((p.width * sc) / TILE), ny = Math.ceil((p.height * sc) / TILE);
+  const x0 = Math.max(0, Math.floor(-X / (TILE * k))), x1 = Math.min(nx - 1, Math.floor((cw - X) / (TILE * k)));
+  const y0 = Math.max(0, Math.floor(-Y / (TILE * k))), y1 = Math.min(ny - 1, Math.floor((ch - Y) / (TILE * k)));
+  const cx = cw / 2, cy = ch / 2;
+  for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {
+    const key = tileKey(state.page, L, tx, ty), t = tiles.get(key);
+    // Snap edges to whole device pixels so neighbouring tiles don't leave hairline seams.
+    const sx = Math.round(X + tx * TILE * k), sy = Math.round(Y + ty * TILE * k);
+    const ex = Math.round(X + (tx + 1) * TILE * k), ey = Math.round(Y + (ty + 1) * TILE * k);
+    if (t && t[kind]) {
+      if (want) { tiles.delete(key); tiles.set(key, t); } // LRU touch
+      // Tiles are transparent off the ink; paper underneath hides the blurrier layers below.
+      const px1 = Math.max(sx, Math.round(X)), py1 = Math.max(sy, Math.round(Y));
+      const px2 = Math.min(ex, Math.round(X + p.width * S)), py2 = Math.min(ey, Math.round(Y + p.height * S));
+      ctx.fillStyle = paperColor();
+      ctx.fillRect(px1, py1, px2 - px1, py2 - py1);
+      ctx.drawImage(t[kind], sx, sy, ex - sx, ey - sy);
+    } else if (want) {
+      queue.push({ key, kind, page: state.page, L, x: tx, y: ty, prio: prio * 1e7 + Math.hypot((sx + ex) / 2 - cx, (sy + ey) / 2 - cy) });
+    }
+  }
+}
+function drawOverlays(ctx, r, S, X, Y, dpr) {
+  const box = (b) => [X + b[0] * S, Y + b[1] * S, (b[2] - b[0]) * S, (b[3] - b[1]) * S];
+  if (state.boxes && r.an) {
+    ctx.strokeStyle = colors.chg;
+    r.an.regions.forEach((b, i) => {
+      const cur = i === state.region;
+      ctx.lineWidth = (cur ? 2.5 : 1.5) * dpr; ctx.setLineDash(cur ? [] : [5 * dpr, 3 * dpr]);
+      ctx.globalAlpha = cur ? 1 : 0.85;
+      ctx.strokeRect(...box(b));
+    });
+    ctx.globalAlpha = 1; ctx.setLineDash([]);
+  }
+  const c = state.focus;
+  if (!c) return;
+  ctx.lineWidth = 3 * dpr;
+  const rect = (b, col) => { ctx.strokeStyle = col; ctx.strokeRect(...box(b)); };
+  if (c.boxA && c.boxB && c.boxA.join() !== c.boxB.join()) {
+    const mid = (b) => [X + ((b[0] + b[2]) / 2) * S, Y + ((b[1] + b[3]) / 2) * S];
+    ctx.save(); ctx.strokeStyle = colors.mov; ctx.lineWidth = 1.5 * dpr; ctx.setLineDash([4 * dpr, 3 * dpr]);
+    ctx.beginPath(); ctx.moveTo(...mid(c.boxA)); ctx.lineTo(...mid(c.boxB)); ctx.stroke(); ctx.restore();
+    rect(c.boxA, colors.rem); rect(c.boxB, colors.add);
+  } else if (c.boxB) rect(c.boxB, c.op === "added" ? colors.add : colors.accent);
+  else if (c.boxA) rect(c.boxA, colors.rem);
+}
+
+// ---------- modes and view ----------
+function applyMode() {
+  const m = state.mode;
+  $("#paneR").hidden = m !== "side";
+  $("#swipe").style.display = m === "swipe" ? "block" : "none";
+  $("#lblSwipe").hidden = m !== "swipe";
+  for (const b of document.querySelectorAll("#modes button")) b.classList.toggle("on", b.dataset.mode === m);
+  clearInterval(state.blinkTimer); state.blinkTimer = null;
+  if (m === "blink") state.blinkTimer = setInterval(() => { state.blinkSide = state.blinkSide === "a" ? "b" : "a"; updateLabel(); requestDraw(); }, 650);
+  updateLabel();
+  updateSwipe();
+  requestDraw();
+  prefs.mode = m; savePrefs();
+}
+function updateLabel() {
+  const m = state.mode, lbl = $("#lblL");
+  const side = m === "blink" ? state.blinkSide : m === "b" ? "b" : m === "diff" ? "" : "a";
+  lbl.className = "panelbl" + (side ? " " + side : "");
+  lbl.textContent = side ? side.toUpperCase() + (m === "blink" ? " (blink)" : "") : "";
+  lbl.hidden = !side;
+}
+function applyPaper() { $("#paperBtn").classList.toggle("on", state.darkPaper); requestDraw(); }
+function setMode(m) {
+  const wasSide = state.mode === "side", before = paneSize();
+  state.mode = m; applyMode();
+  if (wasSide !== (m === "side")) { // pane width changed: keep the same point centred
+    const after = paneSize(), v = state.view;
+    v.tx += (after.w - before.w) / 2; v.ty += (after.h - before.h) / 2;
+  }
+  requestDraw();
+}
+function fit(box) {
+  const p = DATA.pages[state.page], { w, h } = paneSize();
+  let [x1, y1, x2, y2] = box || [0, 0, p.width, p.height];
+  if (box) { // keep some context around small targets
+    const minSz = 45, cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
+    const bw = Math.max(x2 - x1 + 16, minSz), bh = Math.max(y2 - y1 + 16, (minSz * h) / w);
+    x1 = cx - bw / 2; x2 = cx + bw / 2; y1 = cy - bh / 2; y2 = cy + bh / 2;
+  }
+  const s = Math.min(w / (x2 - x1), h / (y2 - y1)) * (box ? 1 : 0.96);
+  state.view = { s, tx: w / 2 - ((x1 + x2) / 2) * s, ty: h / 2 - ((y1 + y2) / 2) * s };
+  requestDraw();
+}
+function zoomAt(f, cx, cy) {
+  const v = state.view, { w } = paneSize(), p = DATA.pages[state.page];
+  const minS = (w / p.width) * 0.3, maxS = (2 ** MAX_LEVEL) / (devicePixelRatio || 1); // never upscale the finest tiles
+  const s = Math.min(maxS, Math.max(minS, v.s * f));
+  state.view = { s, tx: cx - ((cx - v.tx) * s) / v.s, ty: cy - ((cy - v.ty) * s) / v.s };
+  requestDraw();
+}
+function updateSwipe() {
+  if (state.mode !== "swipe") return;
+  $("#swipe").style.left = state.swipe * paneSize().w + "px";
+  requestDraw();
+}
+
+for (const pane of panes) {
+  const e = pane.el;
+  e.addEventListener("wheel", (ev) => {
+    ev.preventDefault();
+    lastInteract = performance.now();
+    const r = e.getBoundingClientRect();
+    const f = Math.exp(-(ev.deltaMode === 1 ? ev.deltaY * 16 : ev.deltaY) * 0.0015);
+    zoomAt(f, ev.clientX - r.left, ev.clientY - r.top);
+  }, { passive: false });
+  let drag = null;
+  e.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0) return;
+    drag = { x: ev.clientX, y: ev.clientY, tx: state.view.tx, ty: state.view.ty };
+    e.setPointerCapture(ev.pointerId); e.classList.add("drag");
+  });
+  e.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    lastInteract = performance.now();
+    state.view.tx = drag.tx + ev.clientX - drag.x; state.view.ty = drag.ty + ev.clientY - drag.y;
+    requestDraw();
+  });
+  const end = () => { drag = null; e.classList.remove("drag"); };
+  e.addEventListener("pointerup", end); e.addEventListener("pointercancel", end);
+  e.addEventListener("dblclick", (ev) => { const r = e.getBoundingClientRect(); zoomAt(2, ev.clientX - r.left, ev.clientY - r.top); });
+}
+{
+  const h = $("#swipe"); let on = false;
+  h.addEventListener("pointerdown", (ev) => { on = true; h.setPointerCapture(ev.pointerId); ev.stopPropagation(); });
+  h.addEventListener("pointermove", (ev) => {
+    if (!on) return;
+    const r = $("#viewer").getBoundingClientRect();
+    state.swipe = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)); updateSwipe();
+  });
+  h.addEventListener("pointerup", () => (on = false));
+}
+new ResizeObserver(() => { updateSwipe(); requestDraw(); }).observe($("#viewer"));
+
+// ---------- areas and focus ----------
+function union(a, b) {
+  if (!a) return b; if (!b) return a;
+  return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])];
+}
+function drawFocus(c) { state.focus = c; requestDraw(); }
+function currentRegions() { const r = rt.get(state.page); return r && r.an ? r.an.regions : null; }
+function gotoRegion(d) {
+  const regs = currentRegions();
+  if (!regs || !regs.length) return;
+  state.region = (state.region + d + regs.length) % regs.length;
+  fit(regs[state.region]); updateRegInfo();
+}
+function updateRegInfo() {
+  const regs = currentRegions();
+  $("#regInfo").textContent = !regs ? "analysing…" : !regs.length ? "no visual diff" :
+    state.region < 0 ? `${regs.length} area${regs.length > 1 ? "s" : ""}` : `area ${state.region + 1} / ${regs.length}`;
+}
+function updateStatus() {
+  const p = DATA.pages[state.page];
+  let s = `${p.name}  ·  ${Math.round(state.view.s * 25.4)} px/in`;
+  if (DEBUG) s += `  ·  tiles ${tiles.size}, ${stats.rendered} rendered, ${stats.rendered ? (stats.ms / stats.rendered).toFixed(0) : 0} ms avg`;
+  $("#status").textContent = s;
+}
+
+// ---------- sidebar ----------
+function renderPages() {
+  const ul = $("#pages"); ul.replaceChildren();
+  DATA.pages.forEach((p, i) => {
+    const label = { same: "same", changed: `${p.changes.length || "visual"}`, added: "new", removed: "deleted" }[p.status];
+    ul.append(el("li", { class: i === state.page ? "on" : "", title: p.file, onclick: () => selectPage(i) },
+      el("span", { class: "pg" }, p.page || ""), el("span", { class: "nm" }, p.name),
+      el("span", { class: "badge " + p.status }, label)));
+  });
+}
+function renderChanges() {
+  const p = DATA.pages[state.page], box = $("#changes");
+  const counts = {};
+  for (const c of p.changes) counts[c.category] = (counts[c.category] || 0) + 1;
+  const f = $("#filters"); f.replaceChildren();
+  for (const [cat, name] of Object.entries(CATS)) {
+    if (!counts[cat]) continue;
+    f.append(el("button", { class: "chip" + (state.filters[cat] ? " on" : ""), onclick: () => { state.filters[cat] = !state.filters[cat]; prefs.filters = state.filters; savePrefs(); renderChanges(); } },
+      name, el("span", { class: "n" }, String(counts[cat]))));
+  }
+  $("#chHead").textContent = `Changes on ${p.name}`;
+  box.replaceChildren();
+  const shown = p.changes.filter((c) => state.filters[c.category]);
+  if (!p.changes.length) {
+    box.append(el("div", { class: "empty" }, p.status === "same" ? "No differences on this sheet." :
+      "No object-level changes; see highlighted areas for visual differences (e.g. title block)."));
+    return;
+  }
+  let last = null;
+  for (const c of shown) {
+    if (c.category !== last) { box.append(el("div", { class: "grp" }, CATS[c.category] || c.category)); last = c.category; }
+    const row = el("div", { class: "ch" + (state.selected === c ? " on" : ""), title: c.op, onclick: () => selectChange(c, row) },
+      el("span", { class: "op " + c.op }, OPS[c.op] || "?"),
+      el("div", {}, el("span", { class: "t" }, c.title), c.subtitle ? el("span", { class: "s" }, c.subtitle) : null),
+      c.details && c.details.length ? el("ul", {}, ...c.details.map((d) => el("li", {}, d))) : null);
+    box.append(row);
+  }
+}
+function selectChange(c, row) {
+  state.selected = c;
+  for (const r of document.querySelectorAll(".ch.on")) r.classList.remove("on");
+  row && row.classList.add("on");
+  if (c.op === "removed" && (state.mode === "b")) setMode("a");
+  if (c.op === "added" && (state.mode === "a")) setMode("b");
+  drawFocus(c);
+  fit(union(c.boxA, c.boxB));
+}
+
+// ---------- page selection ----------
+async function selectPage(i) {
+  if (i !== state.page) dropTiles(state.page);
+  state.page = i; state.region = -1; state.selected = null; state.focus = null;
+  renderPages(); renderChanges();
+  applyMode(); fit(); updateRegInfo();
+  await loadPage(i);
+  if (state.page !== i) return;
+  updateRegInfo(); requestDraw();
+}
+
+// ---------- wiring ----------
+for (const b of document.querySelectorAll("#modes button")) b.onclick = () => setMode(b.dataset.mode);
+$("#prevReg").onclick = () => gotoRegion(-1);
+$("#nextReg").onclick = () => gotoRegion(1);
+$("#fitBtn").onclick = () => fit();
+$("#boxesBtn").onclick = () => toggleBoxes();
+$("#paperBtn").onclick = () => { state.darkPaper = !state.darkPaper; prefs.darkPaper = state.darkPaper; savePrefs(); applyPaper(); };
+$("#helpBtn").onclick = () => $("#help").classList.toggle("on");
+$("#help").onclick = () => $("#help").classList.remove("on");
+function toggleBoxes() { state.boxes = !state.boxes; prefs.boxes = state.boxes; savePrefs(); $("#boxesBtn").classList.toggle("on", state.boxes); requestDraw(); }
+document.addEventListener("keydown", (ev) => {
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  const modes = ["a", "b", "diff", "swipe", "side", "blink"];
+  const { w, h } = paneSize();
+  switch (ev.key) {
+    case "1": case "2": case "3": case "4": case "5": case "6": setMode(modes[+ev.key - 1]); break;
+    case " ": ev.preventDefault(); setMode(state.mode === "a" ? "b" : "a"); break;
+    case "n": gotoRegion(1); break;
+    case "p": gotoRegion(-1); break;
+    case "j": if (state.page < DATA.pages.length - 1) selectPage(state.page + 1); break;
+    case "k": if (state.page > 0) selectPage(state.page - 1); break;
+    case "f": fit(); break;
+    case "h": toggleBoxes(); break;
+    case "+": case "=": zoomAt(1.4, w / 2, h / 2); break;
+    case "-": zoomAt(1 / 1.4, w / 2, h / 2); break;
+    case "?": $("#help").classList.toggle("on"); break;
+    case "Escape": $("#help").classList.remove("on"); break;
+    default: return;
+  }
+});
+
+function renderHeader() {
+  const fill = (node, tag, r) => {
+    node.replaceChildren(el("span", { class: "tag" }, tag), el("span", { class: "lbl" }, r.label + (r.commit && !r.commit.startsWith(r.label) ? " " + r.commit.slice(0, 8) : "")),
+      el("span", { class: "sub", title: [r.subject, r.author, r.date].filter(Boolean).join(" · ") }, r.subject || ""));
+  };
+  fill($("#revA"), "A", DATA.a); fill($("#revB"), "B", DATA.b);
+  $("#boxesBtn").classList.toggle("on", state.boxes);
+}
+
+renderHeader();
+// Optional deep link: #mode=swipe&sheet=/power&area=2
+(async () => {
+  const q = new URLSearchParams(location.hash.slice(1));
+  if (["a", "b", "diff", "swipe", "side", "blink"].includes(q.get("mode"))) state.mode = q.get("mode");
+  let start = DATA.pages.findIndex((p) => p.name === q.get("sheet"));
+  if (start < 0) start = Math.max(0, DATA.pages.findIndex((p) => p.status !== "same")); // first sheet that differs
+  await selectPage(start);
+  for (let n = +q.get("area") || 0; n > 0; n--) gotoRegion(1);
+})();
+</script>
+</body>
+</html>
