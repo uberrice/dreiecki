@@ -3,6 +3,8 @@
 Visual diff of KiCad schematics, or PCBs with `-pcb`, between two git revisions. It produces one
 self-contained, interactive HTML file.
 
+**[Live demo](https://uberrice.github.io/dreiecki/):** a schematic and a PCB report from a small test project.
+
 ```sh
 dreiecki HEAD~1                 # last commit vs. working tree
 dreiecki main my-branch         # two branches / tags / commits
@@ -24,6 +26,8 @@ current browser.
 * **Change list:** components (value, footprint, any field, symbol, unit, DNP/BOM flags, moves),
   labels, wires, junctions, text, sheet symbols and graphics. Click one to zoom to it.
 
+![Schematic diff: three decoupling capacitors added](docs/images/schematic.png)
+
 With `-pcb` the same viewer shows the board instead:
 
 * **Layers list:** an "All layers" overview (copper, silkscreen and board outline), then every copper
@@ -35,6 +39,8 @@ With `-pcb` the same viewer shows the board instead:
   pad/graphics geometry, moves and rotation), tracks, vias, zones, board text and graphics, added or
   removed nets, and title block / board setup. The overview lists every change, and each layer lists
   the changes that touch it. Nets are compared by name, so renumbering them is not a change.
+
+![PCB diff, all layers, zoomed in](docs/images/pcb-diff.png)
 
 Board colours come from your KiCad PCB colour theme, so PCB reports start on dark paper. The
 **Paper** button switches to light paper.
