@@ -64,14 +64,14 @@ func main() {
 		verFlag   = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Usage = usage
-	flag.Parse()
+	args := parseArgs(flag.CommandLine, os.Args[1:])
 
 	if *verFlag {
 		fmt.Println("dreiecki", version)
 		return
 	}
 
-	refA, refB, err := parseRefs(flag.Args())
+	refA, refB, err := parseRefs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		usage()
@@ -82,6 +82,23 @@ func main() {
 	if err := run(refA, refB, *schFlag, *outFlag, pcb, *openFlag, *keepTmp, opt); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
+	}
+}
+
+// parseArgs parses flags anywhere on the command line, not just before the
+// revisions, and returns the positional arguments. Everything after "--" is positional.
+func parseArgs(fs *flag.FlagSet, args []string) []string {
+	var pos []string
+	for {
+		fs.Parse(args)
+		rest := fs.Args()
+		if n := len(args) - len(rest); n > 0 && args[n-1] == "--" {
+			return append(pos, rest...)
+		}
+		if len(rest) == 0 {
+			return pos
+		}
+		pos, args = append(pos, rest[0]), rest[1:]
 	}
 }
 
