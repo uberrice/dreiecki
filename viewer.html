@@ -847,9 +847,12 @@ function setOpacity(v) {
 // ---------- page selection ----------
 async function selectPage(i) {
   if (i !== state.page) dropTiles(state.page);
-  state.page = i; state.region = -1; state.selected = null; state.focus = null;
+  // Keep zoom and position between pages of the same size (e.g. board layers); fit otherwise.
+  const prev = state.fitted ? DATA.pages[state.page] : null, next = DATA.pages[i];
+  const keepView = prev && prev.width === next.width && prev.height === next.height;
+  state.page = i; state.fitted = true; state.region = -1; state.selected = null; state.focus = null;
   renderPages(); renderChanges(); updateLayerCtl();
-  applyMode(); fit(); updateRegInfo();
+  applyMode(); if (!keepView) fit(); updateRegInfo();
   await loadPage(i);
   if (state.page !== i) return;
   updateRegInfo(); requestDraw();
