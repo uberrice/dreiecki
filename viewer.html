@@ -112,6 +112,12 @@ aside h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; co
 #help div { background: var(--panel); border-radius: 10px; padding: 16px 20px; max-width: 420px; box-shadow: 0 8px 30px rgba(0,0,0,.3); }
 #help table { border-collapse: collapse; }
 #help td { padding: 3px 10px 3px 0; }
+.pane.measuring { cursor: crosshair; }
+/* View mode: one revision, nothing to compare. */
+body.view .rev.b { background: var(--panel-2); }
+body.view .rev .tag, body.view .arrow, body.view #revA, body.view #modes, body.view .regnav, body.view #boxesBtn,
+body.view .badge, body.view #chHead, body.view #filters, body.view #changes, body.view .diffonly { display: none; }
+body.view #pages { max-height: none; flex: 1; padding-bottom: 12px; }
 .legend { display: inline-flex; gap: 10px; color: var(--muted); font-size: 12px; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
 
@@ -145,6 +151,7 @@ aside h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; co
       <button class="btn" id="topBtn" title="Copper layer drawn on top (v)">Top: –</button>
       <label title="Copper opacity">Copper <input type="range" id="opacity" min="0.1" max="1" step="0.05"><span id="opacityVal"></span></label>
     </div>
+    <button class="btn" id="measureBtn" title="Measure a distance: click two points (m)">Measure</button>
     <button class="btn on" id="boxesBtn" title="Outline differing areas (h)">Outlines</button>
     <button class="btn" id="fitBtn" title="Fit page (f)">Fit</button>
     <button class="btn" id="paperBtn" title="Toggle light/dark paper (for dark KiCad themes)">Paper</button>
@@ -168,17 +175,18 @@ aside h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; co
     <div id="help"><div>
       <h3 style="margin-top:0">Keyboard</h3>
       <table>
-        <tr><td><kbd>1</kbd>–<kbd>6</kbd></td><td>A · B · Diff · Swipe · Side by side · Blink</td></tr>
-        <tr><td><kbd>Space</kbd></td><td>Flip between A and B</td></tr>
-        <tr><td><kbd>n</kbd> / <kbd>p</kbd></td><td>Next / previous differing area</td></tr>
+        <tr class="diffonly"><td><kbd>1</kbd>–<kbd>6</kbd></td><td>A · B · Diff · Swipe · Side by side · Blink</td></tr>
+        <tr class="diffonly"><td><kbd>Space</kbd></td><td>Flip between A and B</td></tr>
+        <tr class="diffonly"><td><kbd>n</kbd> / <kbd>p</kbd></td><td>Next / previous differing area</td></tr>
         <tr><td><kbd>j</kbd> / <kbd>k</kbd></td><td>Next / previous <span class="unit">sheet</span></td></tr>
         <tr><td><kbd>f</kbd></td><td>Fit page</td></tr>
-        <tr><td><kbd>h</kbd></td><td>Toggle outlines</td></tr>
+        <tr class="diffonly"><td><kbd>h</kbd></td><td>Toggle outlines</td></tr>
         <tr class="pcbonly"><td><kbd>v</kbd></td><td>Next copper layer on top (All layers)</td></tr>
+        <tr><td><kbd>m</kbd></td><td>Measure: click two points (<kbd>Shift</kbd> keeps it horizontal / vertical, <kbd>Esc</kbd> clears)</td></tr>
         <tr><td><kbd>+</kbd> / <kbd>-</kbd></td><td>Zoom</td></tr>
         <tr><td>Wheel / drag</td><td>Zoom / pan</td></tr>
       </table>
-      <p class="legend"><span><i style="background:var(--rem)"></i>only in A (removed)</span><span><i style="background:var(--add)"></i>only in B (added)</span></p>
+      <p class="legend diffonly"><span><i style="background:var(--rem)"></i>only in A (removed)</span><span><i style="background:var(--add)"></i>only in B (added)</span></p>
     </div></div>
   </section>
 </main>
@@ -301,7 +309,7 @@ const el = (tag, attrs = {}, ...kids) => {
   return e;
 };
 
-const PCB = DATA.kind === "pcb", UNIT = PCB ? "layer" : "sheet";
+const PCB = DATA.kind === "pcb", VIEW = !!DATA.view, UNIT = PCB ? "layer" : "sheet";
 const CATS = PCB ?
   { footprint: "Footprints", zone: "Zones", track: "Tracks", via: "Vias", text: "Text", graphic: "Graphics", net: "Nets", board: "Board" } :
   { component: "Components", sheet: "Sheets", label: "Labels", wire: "Wires", junction: "Junctions / NC", power: "Power symbols", text: "Text", graphic: "Graphics" };
@@ -313,12 +321,14 @@ const DEBUG = /(^|[#&])debug\b/.test(location.hash);
 // KiCad's board colours are made for a dark background, so PCB reports start on dark paper.
 const PAPER_PREF = PCB ? "darkPaperPcb" : "darkPaper";
 const state = {
-  page: 0, mode: prefs.mode || "diff", boxes: prefs.boxes !== false, darkPaper: prefs[PAPER_PREF] ?? PCB,
+  page: 0, mode: VIEW ? "b" : prefs.mode || "diff", boxes: prefs.boxes !== false, darkPaper: prefs[PAPER_PREF] ?? PCB,
   view: { s: 1, tx: 0, ty: 0 }, swipe: 0.5, region: -1, focus: null, selected: null,
   filters: Object.assign(Object.fromEntries(Object.keys(CATS).map((k) => [k, true])), prefs.filters || {}),
   blinkSide: "a", blinkTimer: null,
   // All layers page: copper opacity and which copper layer is drawn above the others.
   opacity: prefs.copperOpacity ?? 1, top: prefs.topLayer || "F.Cu",
+  // Measure tool: points in page mm; p2 null while the second point follows the cursor (live).
+  measure: { on: false, p1: null, p2: null, live: null },
 };
 
 // ---------- page loading and whole-page analysis ----------
@@ -440,6 +450,7 @@ async function rasterPage(i, r) {
   r.ov = { a: ra.bmp, b: rb.bmp, d: old ? old.d : null, R };
   if (old) { old.a.close(); old.b.close(); }
   requestDraw();
+  if (VIEW) return; // nothing to compare
   const res = await runAnalysis({ a: plain.a, b: plain.b, da: custom ? ra.data : null, db: custom ? rb.data : null, W, H, R });
   if (r.gen !== gen || rt.get(i) !== r) return; // superseded or evicted
   r.an = { R, W, H, washRem: res.washRem, washAdd: res.washAdd, regions: res.regions, changed: res.changed };
@@ -526,7 +537,7 @@ for (const p of panes) { p.cv = p.el.querySelector("canvas"); p.ctx = p.cv.getCo
 let colors = {};
 function readColors() {
   const cs = getComputedStyle(document.documentElement), g = (n) => cs.getPropertyValue(n).trim();
-  colors = { canvas: g("--canvas"), paper: g("--paper"), rem: g("--rem"), add: g("--add"), chg: g("--chg"), mov: g("--mov"), accent: g("--accent") };
+  colors = { canvas: g("--canvas"), paper: g("--paper"), rem: g("--rem"), add: g("--add"), chg: g("--chg"), mov: g("--mov"), accent: g("--accent"), panel: g("--panel"), text: g("--text") };
 }
 readColors();
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readColors(); requestDraw(); });
@@ -578,6 +589,7 @@ function draw() {
       ctx.restore();
     }
     drawOverlays(ctx, r, S, X, Y, dpr);
+    drawMeasure(ctx, S, X, Y, dpr);
   });
   updateStatus();
 }
@@ -643,6 +655,56 @@ function drawOverlays(ctx, r, S, X, Y, dpr) {
   else if (c.boxA) rect(c.boxA, colors.rem);
 }
 
+// ---------- measure tool ----------
+function measureEnds() {
+  const m = state.measure, q = m.p2 || m.live;
+  return m.p1 && q ? [m.p1, q] : null;
+}
+function fmtLen(mm) { return `${mm.toFixed(3)} mm · ${(mm / 0.0254).toFixed(1)} mil`; }
+function drawMeasure(ctx, S, X, Y, dpr) {
+  const m = state.measure, ends = measureEnds();
+  if (!m.p1) return;
+  const pt = (p) => [X + p[0] * S, Y + p[1] * S];
+  ctx.save();
+  ctx.strokeStyle = ctx.fillStyle = colors.accent; ctx.lineWidth = 1.5 * dpr;
+  const mark = (p) => { const [x, y] = pt(p), r = 5 * dpr; ctx.beginPath(); ctx.moveTo(x - r, y); ctx.lineTo(x + r, y); ctx.moveTo(x, y - r); ctx.lineTo(x, y + r); ctx.stroke(); };
+  mark(m.p1);
+  if (ends) {
+    const [a, b] = ends.map(pt);
+    ctx.beginPath(); ctx.moveTo(...a); ctx.lineTo(...b); ctx.stroke();
+    if (m.p2) mark(m.p2);
+    const text = fmtLen(Math.hypot(ends[1][0] - ends[0][0], ends[1][1] - ends[0][1]));
+    ctx.font = `600 ${12 * dpr}px system-ui, sans-serif`;
+    const tw = ctx.measureText(text).width, pad = 5 * dpr, h = 20 * dpr;
+    const lx = (a[0] + b[0]) / 2 + 10 * dpr, ly = (a[1] + b[1]) / 2 - h - 6 * dpr;
+    ctx.fillStyle = colors.panel; ctx.globalAlpha = 0.92;
+    ctx.fillRect(lx, ly, tw + 2 * pad, h);
+    ctx.globalAlpha = 1; ctx.strokeRect(lx, ly, tw + 2 * pad, h);
+    ctx.fillStyle = colors.text; ctx.textBaseline = "middle";
+    ctx.fillText(text, lx + pad, ly + h / 2);
+  }
+  ctx.restore();
+}
+function setMeasure(on) {
+  state.measure = { on, p1: null, p2: null, live: null };
+  $("#measureBtn").classList.toggle("on", on);
+  for (const p of panes) p.el.classList.toggle("measuring", on);
+  requestDraw();
+}
+// Page mm under a pane-relative point; with shift, kept horizontal or vertical from the first point.
+function measurePoint(px, py, shift) {
+  const v = state.view, p = [(px - v.tx) / v.s, (py - v.ty) / v.s], m = state.measure;
+  if (shift && m.p1 && !m.p2) {
+    if (Math.abs(p[0] - m.p1[0]) > Math.abs(p[1] - m.p1[1])) p[1] = m.p1[1]; else p[0] = m.p1[0];
+  }
+  return p;
+}
+function measureClick(p) {
+  const m = state.measure;
+  if (!m.p1 || m.p2) { m.p1 = p; m.p2 = null; m.live = null; } else m.p2 = p;
+  requestDraw();
+}
+
 // ---------- modes and view ----------
 function applyMode() {
   const m = state.mode;
@@ -655,14 +717,14 @@ function applyMode() {
   updateLabel();
   updateSwipe();
   requestDraw();
-  prefs.mode = m; savePrefs();
+  if (!VIEW) { prefs.mode = m; savePrefs(); }
 }
 function updateLabel() {
   const m = state.mode, lbl = $("#lblL");
   const side = m === "blink" ? state.blinkSide : m === "b" ? "b" : m === "diff" ? "" : "a";
   lbl.className = "panelbl" + (side ? " " + side : "");
   lbl.textContent = side ? side.toUpperCase() + (m === "blink" ? " (blink)" : "") : "";
-  lbl.hidden = !side;
+  lbl.hidden = !side || VIEW;
 }
 function applyPaper() { $("#paperBtn").classList.toggle("on", state.darkPaper); requestDraw(); }
 function setMode(m) {
@@ -709,20 +771,30 @@ for (const pane of panes) {
     zoomAt(f, ev.clientX - r.left, ev.clientY - r.top);
   }, { passive: false });
   let drag = null;
+  const local = (ev) => { const r = e.getBoundingClientRect(); return [ev.clientX - r.left, ev.clientY - r.top]; };
   e.addEventListener("pointerdown", (ev) => {
     if (ev.button !== 0) return;
-    drag = { x: ev.clientX, y: ev.clientY, tx: state.view.tx, ty: state.view.ty };
+    drag = { x: ev.clientX, y: ev.clientY, tx: state.view.tx, ty: state.view.ty, moved: false };
     e.setPointerCapture(ev.pointerId); e.classList.add("drag");
   });
   e.addEventListener("pointermove", (ev) => {
+    const m = state.measure;
+    if (m.on && m.p1 && !m.p2) { m.live = measurePoint(...local(ev), ev.shiftKey); requestDraw(); }
     if (!drag) return;
+    // A press that barely moves is a click (it places a measure point), not a pan.
+    if (!drag.moved && Math.hypot(ev.clientX - drag.x, ev.clientY - drag.y) < 4) return;
+    drag.moved = true;
     lastInteract = performance.now();
     state.view.tx = drag.tx + ev.clientX - drag.x; state.view.ty = drag.ty + ev.clientY - drag.y;
     requestDraw();
   });
   const end = () => { drag = null; e.classList.remove("drag"); };
-  e.addEventListener("pointerup", end); e.addEventListener("pointercancel", end);
-  e.addEventListener("dblclick", (ev) => { const r = e.getBoundingClientRect(); zoomAt(2, ev.clientX - r.left, ev.clientY - r.top); });
+  e.addEventListener("pointerup", (ev) => {
+    if (drag && !drag.moved && state.measure.on) measureClick(measurePoint(...local(ev), ev.shiftKey));
+    end();
+  });
+  e.addEventListener("pointercancel", end);
+  e.addEventListener("dblclick", (ev) => { if (!state.measure.on) zoomAt(2, ...local(ev)); });
 }
 {
   const h = $("#swipe"); let on = false;
@@ -757,6 +829,11 @@ function updateRegInfo() {
 function updateStatus() {
   const p = DATA.pages[state.page];
   let s = `${p.name}  ·  ${Math.round(state.view.s * 25.4)} px/in`;
+  const ends = measureEnds();
+  if (ends) {
+    const dx = Math.abs(ends[1][0] - ends[0][0]), dy = Math.abs(ends[1][1] - ends[0][1]);
+    s = `Δx ${fmtLen(dx)}  ·  Δy ${fmtLen(dy)}  ·  ` + s;
+  }
   if (DEBUG) s += `  ·  tiles ${tiles.size}, ${stats.rendered} rendered, ${stats.rendered ? (stats.ms / stats.rendered).toFixed(0) : 0} ms avg`;
   $("#status").textContent = s;
 }
@@ -852,6 +929,7 @@ async function selectPage(i) {
   const keepView = prev && prev.width === next.width && prev.height === next.height;
   state.page = i; state.fitted = true; state.region = -1; state.selected = null; state.focus = null;
   renderPages(); renderChanges(); updateLayerCtl();
+  if (!keepView) state.measure = Object.assign(state.measure, { p1: null, p2: null, live: null });
   applyMode(); if (!keepView) fit(); updateRegInfo();
   await loadPage(i);
   if (state.page !== i) return;
@@ -866,6 +944,7 @@ $("#fitBtn").onclick = () => fit();
 $("#boxesBtn").onclick = () => toggleBoxes();
 $("#paperBtn").onclick = () => { state.darkPaper = !state.darkPaper; prefs[PAPER_PREF] = state.darkPaper; savePrefs(); applyPaper(); };
 $("#topBtn").onclick = () => cycleTop();
+$("#measureBtn").onclick = () => setMeasure(!state.measure.on);
 $("#opacity").oninput = (ev) => setOpacity(+ev.target.value);
 $("#helpBtn").onclick = () => $("#help").classList.toggle("on");
 $("#help").onclick = () => $("#help").classList.remove("on");
@@ -874,6 +953,7 @@ document.addEventListener("keydown", (ev) => {
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
   const modes = ["a", "b", "diff", "swipe", "side", "blink"];
   const { w, h } = paneSize();
+  if (VIEW && ["1", "2", "3", "4", "5", "6", " ", "n", "p", "h"].includes(ev.key)) return;
   switch (ev.key) {
     case "1": case "2": case "3": case "4": case "5": case "6": setMode(modes[+ev.key - 1]); break;
     case " ": ev.preventDefault(); setMode(state.mode === "a" ? "b" : "a"); break;
@@ -884,10 +964,15 @@ document.addEventListener("keydown", (ev) => {
     case "f": fit(); break;
     case "h": toggleBoxes(); break;
     case "v": cycleTop(); break;
+    case "m": setMeasure(!state.measure.on); break;
     case "+": case "=": zoomAt(1.4, w / 2, h / 2); break;
     case "-": zoomAt(1 / 1.4, w / 2, h / 2); break;
     case "?": $("#help").classList.toggle("on"); break;
-    case "Escape": $("#help").classList.remove("on"); break;
+    case "Escape":
+      if ($("#help").classList.contains("on")) $("#help").classList.remove("on");
+      else if (state.measure.p1) setMeasure(state.measure.on); // clear, stay in measure mode
+      else if (state.measure.on) setMeasure(false);
+      break;
     default: return;
   }
 });
@@ -898,6 +983,7 @@ function renderHeader() {
       el("span", { class: "sub", title: [r.subject, r.author, r.date].filter(Boolean).join(" · ") }, r.subject || ""));
   };
   fill($("#revA"), "A", DATA.a); fill($("#revB"), "B", DATA.b);
+  document.body.classList.toggle("view", VIEW);
   $("#boxesBtn").classList.toggle("on", state.boxes);
   $("#paperBtn").classList.toggle("on", state.darkPaper);
   $("#pagesHead").textContent = PCB ? "Layers" : "Sheets";
@@ -910,7 +996,7 @@ renderHeader();
 // Optional deep link: #mode=swipe&sheet=/power&area=2 (layer=F.Cu for boards)
 (async () => {
   const q = new URLSearchParams(location.hash.slice(1));
-  if (["a", "b", "diff", "swipe", "side", "blink"].includes(q.get("mode"))) state.mode = q.get("mode");
+  if (!VIEW && ["a", "b", "diff", "swipe", "side", "blink"].includes(q.get("mode"))) state.mode = q.get("mode");
   let start = DATA.pages.findIndex((p) => p.name === (q.get("sheet") ?? q.get("layer")));
   if (start < 0) start = Math.max(0, DATA.pages.findIndex((p) => p.status !== "same")); // first sheet that differs
   await selectPage(start);

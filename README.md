@@ -11,7 +11,11 @@ dreiecki main my-branch         # two branches / tags / commits
 dreiecki v7..v8 -o review.html --open
 dreiecki -s boards/main/main.kicad_sch HEAD~3   # pick the root schematic explicitly
 dreiecki -pcb HEAD~1            # the board instead of the schematic
+dreiecki -pcb                   # no revisions: just view the current board
 ```
+
+With no revision, dreiecki renders the working tree on its own: the same viewer without the
+comparison tools. This works outside a git repository too.
 
 Requirements: `git`, and `kicad-cli` from KiCad 8 or newer for rendering. The viewer works offline in any
 current browser.
@@ -44,6 +48,9 @@ With `-pcb` the same viewer shows the board instead:
 
 Board colours come from your KiCad PCB colour theme, so PCB reports start on dark paper. The
 **Paper** button switches to light paper.
+
+**Measure** (`m`) measures distances: click two points to get the length in mm and mil, with Δx / Δy
+in the status bar. Hold `Shift` to keep the line horizontal or vertical, and press `Esc` to clear it.
 
 Press `?` in the viewer for keyboard shortcuts. A URL hash such as `#mode=swipe&sheet=/power&area=2`
 opens a specific view.
