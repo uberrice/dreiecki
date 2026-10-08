@@ -20,3 +20,7 @@ git push origin v0.2.0
 ```
 
 The tag name becomes the version (shown by `-version`) and the release title.
+The release notes list the pull requests merged since the previous version tag, as GitHub generates
+them, followed by "Other changes": every commit pushed straight to `main` or merged without a pull
+request. Preview them with `.github/release-notes.sh uberrice/dreiecki vX.Y.Z $(git rev-parse HEAD)`
+(needs `gh`; the commit must already be pushed).

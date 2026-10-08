@@ -98,10 +98,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: read # release-notes.sh looks up which commits came through a pull request
     env:
       VERSION: ${{ needs.version.outputs.version }}
       GH_TOKEN: ${{ github.token }}
     steps:
+      # Full history and tags, to list the commits since the previous release.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           pattern: dist-*
@@ -109,10 +114,12 @@ jobs:
           merge-multiple: true
       - name: Create release
         run: |
+          # Merged pull requests as GitHub lists them, plus commits that didn't come through one.
+          .github/release-notes.sh "$GITHUB_REPOSITORY" "$VERSION" "$GITHUB_SHA" > "$RUNNER_TEMP/notes.md"
           cd dist
           sha256sum * > checksums.txt
           gh release create "$VERSION" * \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "$VERSION" \
-            --generate-notes
+            --notes-file "$RUNNER_TEMP/notes.md"
