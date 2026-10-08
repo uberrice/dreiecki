@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dreiecKi demo</title>
+<style>
+  :root { --bg: #f4f2ee; --fg: #1d1f24; --muted: #5b6070; --card: #fff; --line: #dcd8d0; --accent: #2a62d8; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1d1f24; --fg: #e8e6e1; --muted: #9aa0ad; --card: #262930; --line: #3a3e48; --accent: #7aa2f7; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 48px 16px; }
+  h1 { margin: 0 0 4px; font-size: 28px; }
+  p { color: var(--muted); margin: 0 0 24px; }
+  a.card { display: block; padding: 16px 18px; margin-bottom: 12px; background: var(--card);
+    border: 1px solid var(--line); border-radius: 8px; color: inherit; text-decoration: none; }
+  a.card:hover { border-color: var(--accent); }
+  a.card strong { color: var(--accent); }
+  a.card span { display: block; color: var(--muted); font-size: 14px; }
+  code { font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>dreiecKi demo</h1>
+  <p>Reports from a small test project, comparing <code>834dcf8 test layout</code> with
+    <code>bddb5ec add decoupling caps</code>. Each report is one self-contained HTML file.</p>
+  <a class="card" href="schematic.html"><strong>Schematic diff</strong>
+    <span><code>dreiecki HEAD~1 HEAD</code>: three decoupling capacitors and their power symbols added.</span></a>
+  <a class="card" href="pcb.html"><strong>PCB diff</strong>
+    <span><code>dreiecki -pcb HEAD~1 HEAD</code>: the capacitors placed and the CAN traces rerouted around them.</span></a>
+  <p><a href="https://github.com/uberrice/dreiecki">github.com/uberrice/dreiecki</a></p>
+</main>
+</body>
+</html>
