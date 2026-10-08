@@ -52,6 +52,12 @@ header {
 .btn.on { border-color: var(--accent); color: var(--accent); }
 .regnav { display: inline-flex; align-items: center; gap: 4px; }
 .regnav span { color: var(--muted); min-width: 92px; text-align: center; font-variant-numeric: tabular-nums; }
+.layerctl[hidden] { display: none; }
+.layerctl { display: inline-flex; align-items: center; gap: 8px; }
+.layerctl label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.layerctl input { width: 90px; accent-color: var(--accent); }
+.layerctl #opacityVal { min-width: 3.2em; font-variant-numeric: tabular-nums; }
+.layerctl.off { opacity: .45; pointer-events: none; }
 kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: var(--panel-2); }
 
 main { display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
@@ -135,6 +141,10 @@ aside h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; co
     <div class="regnav" title="Jump between areas that differ visually (n / p)">
       <button class="btn" id="prevReg">◀</button><span id="regInfo">–</span><button class="btn" id="nextReg">▶</button>
     </div>
+    <div class="layerctl" id="layerCtl" hidden title="Only on the All layers page">
+      <button class="btn" id="topBtn" title="Copper layer drawn on top (v)">Top: –</button>
+      <label title="Copper opacity">Copper <input type="range" id="opacity" min="0.1" max="1" step="0.05"><span id="opacityVal"></span></label>
+    </div>
     <button class="btn on" id="boxesBtn" title="Outline differing areas (h)">Outlines</button>
     <button class="btn" id="fitBtn" title="Fit page (f)">Fit</button>
     <button class="btn" id="paperBtn" title="Toggle light/dark paper (for dark KiCad themes)">Paper</button>
@@ -164,6 +174,7 @@ aside h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; co
         <tr><td><kbd>j</kbd> / <kbd>k</kbd></td><td>Next / previous <span class="unit">sheet</span></td></tr>
         <tr><td><kbd>f</kbd></td><td>Fit page</td></tr>
         <tr><td><kbd>h</kbd></td><td>Toggle outlines</td></tr>
+        <tr class="pcbonly"><td><kbd>v</kbd></td><td>Next copper layer on top (All layers)</td></tr>
         <tr><td><kbd>+</kbd> / <kbd>-</kbd></td><td>Zoom</td></tr>
         <tr><td>Wheel / drag</td><td>Zoom / pan</td></tr>
       </table>
@@ -259,7 +270,8 @@ function diffPixels(a, b, out, w, h, wash) {
 }
 
 // Whole-page analysis at overview resolution: change masks, areas, and the diff overview image.
-function analyseBuffers({ a, b, W, H, R }) {
+// da/db, if given, are what is displayed (e.g. translucent copper); the diff image is made from them.
+function analyseBuffers({ a, b, da, db, W, H, R }) {
   const n = W * H, rem = new Uint8Array(n), add = new Uint8Array(n);
   let changed = 0;
   for (let i = 0, j = 0; i < n; i++, j += 4) {
@@ -273,7 +285,7 @@ function analyseBuffers({ a, b, W, H, R }) {
   const washRem = dilate(rem, W, H, wr), washAdd = dilate(add, W, H, wr);
   const diff = new Uint8ClampedArray(n * 4);
   const xs = new Int32Array(W).map((_, i) => i), ys = new Int32Array(H).map((_, i) => i);
-  diffPixels(a, b, diff, W, H, { rem: washRem, add: washAdd, W, xs, ys });
+  diffPixels(da || a, db || b, diff, W, H, { rem: washRem, add: washAdd, W, xs, ys });
   return { regions, washRem, washAdd, diff, changed };
 }
 </script>
@@ -305,6 +317,8 @@ const state = {
   view: { s: 1, tx: 0, ty: 0 }, swipe: 0.5, region: -1, focus: null, selected: null,
   filters: Object.assign(Object.fromEntries(Object.keys(CATS).map((k) => [k, true])), prefs.filters || {}),
   blinkSide: "a", blinkTimer: null,
+  // All layers page: copper opacity and which copper layer is drawn above the others.
+  opacity: prefs.copperOpacity ?? 1, top: prefs.topLayer || "F.Cu",
 };
 
 // ---------- page loading and whole-page analysis ----------
@@ -326,10 +340,29 @@ async function loadImg(url) {
   try { await i.decode(); } catch { return null; }
   return i;
 }
-// Draw an SVG (or nothing) into a w×h canvas, page origin at (-ox, -oy), sc px per mm.
-function rasterize(cv, ctx, img, page, sc, ox, oy) {
+// Draw one side of a page: an SVG image, or a stack of per-layer images bottom to top. Stacks use
+// the chosen top layer and copper opacity, or with plain the default look (opaque, front on top).
+function paint(ctx, src, x, y, w, h, plain) {
+  if (!src) return;
+  if (!src.layers) { ctx.drawImage(src, x, y, w, h); return; }
+  for (const l of stackOrder(src.layers, plain ? null : state.top)) {
+    if (!l.img) continue;
+    ctx.globalAlpha = l.copper && !plain ? state.opacity : 1;
+    ctx.drawImage(l.img, x, y, w, h);
+  }
+  ctx.globalAlpha = 1;
+}
+// Copper back to front with top moved above the rest, then the other layers in report order.
+function stackOrder(layers, top) {
+  const cu = layers.filter((l) => l.copper).reverse(), rest = layers.filter((l) => !l.copper);
+  const i = cu.findIndex((l) => l.layer === top);
+  if (i >= 0) cu.push(cu.splice(i, 1)[0]);
+  return [...cu, ...rest];
+}
+// Draw a page side into a w×h canvas, page origin at (-ox, -oy), sc px per mm.
+function rasterize(cv, ctx, src, page, sc, ox, oy, plain) {
   ctx.clearRect(0, 0, cv.width, cv.height);
-  if (img) ctx.drawImage(img, -ox, -oy, page.width * sc, page.height * sc);
+  paint(ctx, src, -ox, -oy, page.width * sc, page.height * sc, plain);
   const data = ctx.getImageData(0, 0, cv.width, cv.height).data;
   return { bmp: cv.transferToImageBitmap(), data };
 }
@@ -365,18 +398,15 @@ function loadPage(i) {
   rt.set(i, r);
   r.ready = (async () => {
     const p = DATA.pages[i];
-    const [ua, ub] = await Promise.all([unpack(p.svgA), unpack(p.svgB)]);
-    [r.imgA, r.imgB] = await Promise.all([loadImg(ua), loadImg(ub)]);
-    const R = Math.min(6, 3000 / Math.max(p.width, p.height));
-    const W = Math.round(p.width * R), H = Math.round(p.height * R);
-    const cv = new OffscreenCanvas(W, H), ctx = cv.getContext("2d", { willReadFrequently: true });
-    const ra = rasterize(cv, ctx, r.imgA, p, R, 0, 0), rb = rasterize(cv, ctx, r.imgB, p, R, 0, 0);
-    r.ov = { a: ra.bmp, b: rb.bmp, d: null, R };
-    requestDraw();
-    const res = await runAnalysis({ a: ra.data, b: rb.data, W, H, R });
-    r.an = { R, W, H, washRem: res.washRem, washAdd: res.washAdd, regions: res.regions, changed: res.changed };
-    r.ov.d = await createImageBitmap(new ImageData(res.diff, W, H));
-    requestDraw();
+    if (p.stack) {
+      const side = async (k) => ({ layers: await Promise.all(p.stack.map(async (l) =>
+        ({ layer: l.layer, copper: l.copper, img: await loadImg(await unpack(l[k])) }))) });
+      [r.imgA, r.imgB] = await Promise.all([side("svgA"), side("svgB")]);
+    } else {
+      const [ua, ub] = await Promise.all([unpack(p.svgA), unpack(p.svgB)]);
+      [r.imgA, r.imgB] = await Promise.all([loadImg(ua), loadImg(ub)]);
+    }
+    await rasterPage(i, r);
   })();
   // Free memory of pages not looked at recently.
   while (rt.size > KEEP_PAGES) {
@@ -387,6 +417,41 @@ function loadPage(i) {
     dropTiles(old);
   }
   return r.ready;
+}
+
+// Overview bitmaps, analysis and diff image. Stacked pages are analysed in their default look,
+// so a hidden or faint layer doesn't hide its changes; the diff image shows what is displayed.
+async function rasterPage(i, r) {
+  const p = DATA.pages[i], gen = (r.gen = (r.gen || 0) + 1);
+  const R = Math.min(6, 3000 / Math.max(p.width, p.height));
+  const W = Math.round(p.width * R), H = Math.round(p.height * R);
+  const cv = new OffscreenCanvas(W, H), ctx = cv.getContext("2d", { willReadFrequently: true });
+  const ra = rasterize(cv, ctx, r.imgA, p, R, 0, 0), rb = rasterize(cv, ctx, r.imgB, p, R, 0, 0);
+  const custom = !!p.stack && !plainLook(p);
+  if (!custom) r.plain = { a: ra.data, b: rb.data };
+  else if (!r.plain) {
+    const pa = rasterize(cv, ctx, r.imgA, p, R, 0, 0, true), pb = rasterize(cv, ctx, r.imgB, p, R, 0, 0, true);
+    pa.bmp.close(); pb.bmp.close();
+    r.plain = { a: pa.data, b: pb.data };
+  }
+  const plain = r.plain;
+  if (!p.stack) r.plain = null; // only stacked pages are drawn again
+  const old = r.ov;
+  r.ov = { a: ra.bmp, b: rb.bmp, d: old ? old.d : null, R };
+  if (old) { old.a.close(); old.b.close(); }
+  requestDraw();
+  const res = await runAnalysis({ a: plain.a, b: plain.b, da: custom ? ra.data : null, db: custom ? rb.data : null, W, H, R });
+  if (r.gen !== gen || rt.get(i) !== r) return; // superseded or evicted
+  r.an = { R, W, H, washRem: res.washRem, washAdd: res.washAdd, regions: res.regions, changed: res.changed };
+  const d = await createImageBitmap(new ImageData(res.diff, W, H));
+  if (r.gen !== gen || rt.get(i) !== r) { d.close(); return; }
+  if (r.ov.d) r.ov.d.close();
+  r.ov.d = d;
+  requestDraw();
+}
+function plainLook(p) {
+  const cu = p.stack.filter((l) => l.copper);
+  return state.opacity >= 1 && (!cu.length || cu[0].layer === state.top || !cu.some((l) => l.layer === state.top));
 }
 
 // ---------- tile cache ----------
@@ -410,14 +475,13 @@ function renderTile(t, i, L, x, y, kind) {
   const p = DATA.pages[i], r = rt.get(i), sc = 2 ** L;
   if (kind !== "d") {
     tileCtx2.clearRect(0, 0, TILE, TILE);
-    const img = kind === "a" ? r.imgA : r.imgB;
-    if (img) tileCtx2.drawImage(img, -x * TILE, -y * TILE, p.width * sc, p.height * sc);
+    paint(tileCtx2, kind === "a" ? r.imgA : r.imgB, -x * TILE, -y * TILE, p.width * sc, p.height * sc);
     t[kind] = tileCv2.transferToImageBitmap();
   } else {
     const side = (k, img) => {
       tileCtx.clearRect(0, 0, TILE, TILE);
       if (t[k]) tileCtx.drawImage(t[k], 0, 0);
-      else if (img) tileCtx.drawImage(img, -x * TILE, -y * TILE, p.width * sc, p.height * sc);
+      else paint(tileCtx, img, -x * TILE, -y * TILE, p.width * sc, p.height * sc);
       return tileCtx.getImageData(0, 0, TILE, TILE).data;
     };
     const A = side("a", r.imgA), B = side("b", r.imgB), an = r.an;
@@ -745,11 +809,46 @@ function selectChange(c, row) {
   fit(union(c.boxA, c.boxB));
 }
 
+// ---------- layer stacking (All layers page) ----------
+function stackCopper() { return (DATA.pages[state.page].stack || []).filter((l) => l.copper); }
+function updateLayerCtl() {
+  const cu = stackCopper(), top = cu.find((l) => l.layer === state.top) || cu[0];
+  $("#layerCtl").classList.toggle("off", !cu.length);
+  $("#topBtn").textContent = "Top: " + (top ? top.name : "–");
+  $("#opacity").value = state.opacity;
+  $("#opacityVal").textContent = Math.round(state.opacity * 100) + "%";
+}
+let restackTimer = null;
+// Redraw stacked pages with the current order and opacity; delay coalesces slider drags.
+function restack(delay) {
+  updateLayerCtl();
+  clearTimeout(restackTimer);
+  restackTimer = setTimeout(() => {
+    for (const [i, r] of rt) {
+      if (!DATA.pages[i].stack) continue;
+      r.ready.then(() => { if (rt.get(i) === r) { dropTiles(i); rasterPage(i, r); } });
+    }
+  }, delay);
+}
+function cycleTop() {
+  const cu = stackCopper();
+  if (cu.length < 2) return;
+  const i = cu.findIndex((l) => l.layer === state.top);
+  state.top = cu[(Math.max(0, i) + 1) % cu.length].layer;
+  prefs.topLayer = state.top; savePrefs();
+  restack(0);
+}
+function setOpacity(v) {
+  state.opacity = Math.min(1, Math.max(0.1, v));
+  prefs.copperOpacity = state.opacity; savePrefs();
+  restack(60);
+}
+
 // ---------- page selection ----------
 async function selectPage(i) {
   if (i !== state.page) dropTiles(state.page);
   state.page = i; state.region = -1; state.selected = null; state.focus = null;
-  renderPages(); renderChanges();
+  renderPages(); renderChanges(); updateLayerCtl();
   applyMode(); fit(); updateRegInfo();
   await loadPage(i);
   if (state.page !== i) return;
@@ -763,6 +862,8 @@ $("#nextReg").onclick = () => gotoRegion(1);
 $("#fitBtn").onclick = () => fit();
 $("#boxesBtn").onclick = () => toggleBoxes();
 $("#paperBtn").onclick = () => { state.darkPaper = !state.darkPaper; prefs[PAPER_PREF] = state.darkPaper; savePrefs(); applyPaper(); };
+$("#topBtn").onclick = () => cycleTop();
+$("#opacity").oninput = (ev) => setOpacity(+ev.target.value);
 $("#helpBtn").onclick = () => $("#help").classList.toggle("on");
 $("#help").onclick = () => $("#help").classList.remove("on");
 function toggleBoxes() { state.boxes = !state.boxes; prefs.boxes = state.boxes; savePrefs(); $("#boxesBtn").classList.toggle("on", state.boxes); requestDraw(); }
@@ -779,6 +880,7 @@ document.addEventListener("keydown", (ev) => {
     case "k": if (state.page > 0) selectPage(state.page - 1); break;
     case "f": fit(); break;
     case "h": toggleBoxes(); break;
+    case "v": cycleTop(); break;
     case "+": case "=": zoomAt(1.4, w / 2, h / 2); break;
     case "-": zoomAt(1 / 1.4, w / 2, h / 2); break;
     case "?": $("#help").classList.toggle("on"); break;
@@ -796,6 +898,8 @@ function renderHeader() {
   $("#boxesBtn").classList.toggle("on", state.boxes);
   $("#paperBtn").classList.toggle("on", state.darkPaper);
   $("#pagesHead").textContent = PCB ? "Layers" : "Sheets";
+  $("#layerCtl").hidden = !PCB;
+  for (const r of document.querySelectorAll(".pcbonly")) r.hidden = !PCB;
   for (const u of document.querySelectorAll(".unit")) u.textContent = UNIT;
 }
 

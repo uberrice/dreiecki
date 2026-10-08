@@ -19,10 +19,17 @@ type RenderOptions struct {
 	ExcludeDrawSheet bool
 }
 
-// RenderedPage is the SVG of one sheet instance.
+// RenderedPage is the SVG of one sheet instance or board page.
 type RenderedPage struct {
 	SVG           []byte
-	Width, Height float64 // mm, from the SVG viewBox
+	Width, Height float64     // mm, from the SVG viewBox
+	Layers        []*LayerSVG // stacked board pages: one SVG per layer, SVG is unused
+}
+
+// LayerSVG is one layer of a stacked board page.
+type LayerSVG struct {
+	Layer string
+	SVG   []byte
 }
 
 var plottedRe = regexp.MustCompile(`Plotted to '([^']+)'`)
@@ -107,6 +114,7 @@ func readSVG(file string) (*RenderedPage, error) {
 var cliSlots = make(chan struct{}, max(2, min(runtime.NumCPU(), 8)))
 
 // RenderPCB plots each page's layers into its own SVG, keyed by page ID.
+// Stacked pages get one SVG per layer so the viewer can choose their order and opacity.
 // Pages whose layer the board doesn't have are left out.
 func RenderPCB(b *Board, pages []pcbPage, workDir string, opt RenderOptions) (map[string]*RenderedPage, error) {
 	file, err := b.Materialize(filepath.Join(workDir, "src"))
@@ -123,17 +131,7 @@ func RenderPCB(b *Board, pages []pcbPage, workDir string, opt RenderOptions) (ma
 		rendered = map[string]*RenderedPage{}
 		first    error
 	)
-	for i, pg := range pages {
-		if pg.Layer != "" && !b.has(pg.Layer) {
-			continue
-		}
-		var layers []string
-		for _, l := range pg.Layers {
-			if b.has(l) {
-				layers = append(layers, l)
-			}
-		}
-		out := filepath.Join(outDir, fmt.Sprintf("%02d.svg", i))
+	plot := func(layers []string, out string, done func(*RenderedPage)) {
 		args := []string{"pcb", "export", "svg", "-l", strings.Join(layers, ","), "-o", out}
 		if opt.Theme != "" {
 			args = append(args, "--theme", opt.Theme)
@@ -143,7 +141,7 @@ func RenderPCB(b *Board, pages []pcbPage, workDir string, opt RenderOptions) (ma
 		}
 		args = append(args, file)
 		wg.Add(1)
-		go func(id string) {
+		go func() {
 			defer wg.Done()
 			cliSlots <- struct{}{}
 			defer func() { <-cliSlots }()
@@ -173,8 +171,34 @@ func RenderPCB(b *Board, pages []pcbPage, workDir string, opt RenderOptions) (ma
 			if err != nil && first == nil {
 				first = fmt.Errorf("kicad-cli failed: %v\n%s", err, log)
 			}
-			rendered[id] = rp
-		}(pg.ID)
+			done(rp)
+		}()
+	}
+	for i, pg := range pages {
+		if pg.Layer != "" && !b.has(pg.Layer) {
+			continue
+		}
+		var layers []string
+		for _, l := range pg.Layers {
+			if b.has(l) {
+				layers = append(layers, l)
+			}
+		}
+		if !pg.Stack {
+			id := pg.ID
+			plot(layers, filepath.Join(outDir, fmt.Sprintf("%02d.svg", i)), func(rp *RenderedPage) { rendered[id] = rp })
+			continue
+		}
+		stack := &RenderedPage{Layers: make([]*LayerSVG, len(layers))}
+		rendered[pg.ID] = stack
+		for j, l := range layers {
+			plot([]string{l}, filepath.Join(outDir, fmt.Sprintf("%02d-%02d.svg", i, j)), func(rp *RenderedPage) {
+				if rp != nil {
+					stack.Layers[j] = &LayerSVG{Layer: l, SVG: rp.SVG}
+					stack.Width, stack.Height = rp.Width, rp.Height
+				}
+			})
+		}
 	}
 	wg.Wait()
 	return rendered, first

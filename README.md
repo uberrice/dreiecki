@@ -28,6 +28,9 @@ With `-pcb` the same viewer shows the board instead:
 
 * **Layers list:** an "All layers" overview (copper, silkscreen and board outline), then every copper
   layer and each technical layer that has something on it, each drawn together with Edge.Cuts.
+* **Layer stacking:** on "All layers", the **Copper** slider makes the copper layers translucent, and
+  `v` (or the **Top** button) cycles which copper layer is drawn above the others. Changed areas are
+  always found with opaque copper and the front layer on top, so they don't depend on these settings.
 * **Change list:** footprints (reference, value, any field, footprint, side, attributes, pad nets,
   pad/graphics geometry, moves and rotation), tracks, vias, zones, board text and graphics, added or
   removed nets, and title block / board setup. The overview lists every change, and each layer lists

@@ -359,16 +359,26 @@ type Report struct {
 }
 
 type PageReport struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Page    string   `json:"page"`
-	File    string   `json:"file"`
-	Status  string   `json:"status"` // same, changed, added, removed
-	Width   float64  `json:"width"`
-	Height  float64  `json:"height"`
-	SvgA    string   `json:"svgA,omitempty"`
-	SvgB    string   `json:"svgB,omitempty"`
-	Changes []Change `json:"changes"`
+	ID      string       `json:"id"`
+	Name    string       `json:"name"`
+	Page    string       `json:"page"`
+	File    string       `json:"file"`
+	Status  string       `json:"status"` // same, changed, added, removed
+	Width   float64      `json:"width"`
+	Height  float64      `json:"height"`
+	SvgA    string       `json:"svgA,omitempty"`
+	SvgB    string       `json:"svgB,omitempty"`
+	Stack   []StackLayer `json:"stack,omitempty"` // stacked board pages: one SVG per layer
+	Changes []Change     `json:"changes"`
+}
+
+// StackLayer is one layer of a stacked page, as packed SVGs of both revisions.
+type StackLayer struct {
+	Layer  string `json:"layer"`
+	Name   string `json:"name"`
+	Copper bool   `json:"copper"`
+	SvgA   string `json:"svgA,omitempty"`
+	SvgB   string `json:"svgB,omitempty"`
 }
 
 func buildReport(pa, pb *Project, ra, rb map[string]*RenderedPage) *Report {

@@ -648,6 +648,7 @@ type pcbPage struct {
 	Name   string
 	Layer  string   // the layer whose changes are listed; "" for the overview
 	Layers []string // layers to plot
+	Stack  bool     // plot each layer separately so the viewer can stack them
 }
 
 // Non-copper layers in the order they are listed, if anything is drawn on them.
@@ -660,7 +661,7 @@ var techLayers = []string{
 func planPages(a, b *Board) []pcbPage {
 	copper := union(b.Copper, a.Copper)
 	sort.SliceStable(copper, func(i, j int) bool { return copperRank(copper[i]) < copperRank(copper[j]) })
-	pages := []pcbPage{{ID: "all", Name: "All layers", Layers: append(append([]string{}, copper...), "F.SilkS", "B.SilkS", "Edge.Cuts")}}
+	pages := []pcbPage{{ID: "all", Name: "All layers", Stack: true, Layers: append(append([]string{}, copper...), "F.SilkS", "B.SilkS", "Edge.Cuts")}}
 	for _, l := range copper {
 		pages = append(pages, pcbPage{ID: l, Layer: l, Layers: []string{l, "Edge.Cuts"}})
 	}
@@ -706,11 +707,15 @@ func buildPCBReport(ba, bb *Board, pages []pcbPage, ra, rb map[string]*RenderedP
 				page.Width, page.Height = sp.Width, sp.Height
 			}
 		}
-		if svgA != nil {
-			page.SvgA = packSVG(svgA.SVG)
-		}
-		if svgB != nil {
-			page.SvgB = packSVG(svgB.SVG)
+		if pg.Stack {
+			page.Stack = stackLayers(ba, bb, pg.Layers, svgA, svgB)
+		} else {
+			if svgA != nil {
+				page.SvgA = packSVG(svgA.SVG)
+			}
+			if svgB != nil {
+				page.SvgB = packSVG(svgB.SVG)
+			}
 		}
 		switch {
 		case svgA == nil && svgB == nil:
@@ -719,7 +724,7 @@ func buildPCBReport(ba, bb *Board, pages []pcbPage, ra, rb map[string]*RenderedP
 			page.Status = "added"
 		case svgB == nil:
 			page.Status = "removed"
-		case len(page.Changes) > 0 || !bytes.Equal(stripVolatile(svgA.SVG), stripVolatile(svgB.SVG)):
+		case len(page.Changes) > 0 || !bytes.Equal(stripVolatile(svgA.SVG), stripVolatile(svgB.SVG)) || stackDiffers(page.Stack):
 			page.Status = "changed"
 		default:
 			page.Status = "same"
@@ -727,4 +732,39 @@ func buildPCBReport(ba, bb *Board, pages []pcbPage, ra, rb map[string]*RenderedP
 		rep.Pages = append(rep.Pages, page)
 	}
 	return rep
+}
+
+// stackLayers pairs the per-layer SVGs of a stacked page, bottom to top in plot order.
+func stackLayers(ba, bb *Board, layers []string, svgA, svgB *RenderedPage) []StackLayer {
+	find := func(rp *RenderedPage, l string) string {
+		if rp == nil {
+			return ""
+		}
+		for _, ls := range rp.Layers {
+			if ls != nil && ls.Layer == l {
+				return packSVG(ls.SVG)
+			}
+		}
+		return ""
+	}
+	var out []StackLayer
+	for _, l := range layers {
+		sl := StackLayer{Layer: l, Name: bb.layerName(l), Copper: strings.HasSuffix(l, ".Cu"), SvgA: find(svgA, l), SvgB: find(svgB, l)}
+		if !bb.has(l) {
+			sl.Name = ba.layerName(l)
+		}
+		if sl.SvgA != "" || sl.SvgB != "" {
+			out = append(out, sl)
+		}
+	}
+	return out
+}
+
+func stackDiffers(stack []StackLayer) bool {
+	for _, l := range stack {
+		if l.SvgA != l.SvgB {
+			return true
+		}
+	}
+	return false
 }
