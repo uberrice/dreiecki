@@ -64,11 +64,4 @@ with `kicad-cli pcb export svg`.
 -keep-temp           keep the rendered SVGs
 ```
 
-Build: `go build` (Go 1.27.1+). Cross-compile: `GOOS=windows go build`.
-
-## Releases
-
-Every push to `main` builds Linux, macOS and Windows binaries (amd64 and arm64) and publishes a
-GitHub release, bumping the patch version (`v0.1.0`, `v0.1.1`, …). To bump the minor or major
-version, tag the commit yourself (`git tag v0.2.0`) and push the tag before or together with the
-commit. That commit is released as `v0.2.0`, and later pushes continue from there.
+Building from source and cutting releases: see [docs/develop.md](docs/develop.md).
