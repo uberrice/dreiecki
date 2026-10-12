@@ -302,7 +302,7 @@ func (b *Board) footprint(n *Node) *Component {
 		}
 		if field {
 			pos := orEmpty(ch.Child("at")).String() + " " + ch.Child("layer").Arg(0)
-			if hd := ch.Child("hide"); hd != nil && hd.Arg(0) != "no" || hasAtom(ch, "hide") {
+			if fieldHidden(ch) {
 				pos += " hidden"
 			}
 			fieldPos = append(fieldPos, name+"@"+pos)

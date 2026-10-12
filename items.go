@@ -142,7 +142,7 @@ func extractComponent(n *Node, inst *SheetInst, libDefs map[string]string) *Comp
 		if at := pr.Child("at"); at != nil {
 			pos = at.String()
 		}
-		if pr.Child("hide") != nil && pr.Child("hide").Arg(0) == "yes" {
+		if fieldHidden(pr) {
 			pos += " hidden"
 		}
 		fieldPos = append(fieldPos, name+"@"+pos)
@@ -282,4 +282,16 @@ func symbolGeometry(n *Node) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+func fieldHidden(n *Node) bool {
+	for _, parent := range []*Node{n, n.Child("effects")} {
+		if parent == nil {
+			continue
+		}
+		if hd := parent.Child("hide"); hd != nil && hd.Arg(0) != "no" || hasAtom(parent, "hide") {
+			return true
+		}
+	}
+	return false
 }
