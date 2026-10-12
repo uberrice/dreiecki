@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -49,5 +50,19 @@ func TestSchematicHierarchyAndInstanceReferences(t *testing.T) {
 				t.Errorf("instance %s: %+v", sheet.Key(), c)
 			}
 		}
+	}
+}
+
+func TestComponentsWithoutUUIDs(t *testing.T) {
+	const body = `(symbol (lib_id "Device:R") (unit 1) (property "Reference" "R1") (property "Value" "10k"))
+  (symbol (lib_id "Device:R") (unit 1) (property "Reference" "R2") (property "Value" "20k"))`
+	_, a := schematic(t, body)
+	_, b := schematic(t, body)
+	if ch := diffComponents(a.Components, b.Components); len(ch) != 0 {
+		t.Fatalf("identical UUID-less components: %+v", ch)
+	}
+	_, b = schematic(t, strings.ReplaceAll(body, `"20k"`, `"22k"`))
+	if ch := diffComponents(a.Components, b.Components); len(ch) != 1 || ch[0].Title != "R2" || ch[0].Op != "changed" {
+		t.Fatalf("reference matching: %+v", ch)
 	}
 }

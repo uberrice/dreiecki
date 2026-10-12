@@ -25,7 +25,9 @@ func diffComponents(a, b []*Component) []Change {
 	var changes []Change
 	byUUID := map[string]*Component{}
 	for _, c := range b {
-		byUUID[c.UUID] = c
+		if c.UUID != "" {
+			byUUID[c.UUID] = c
+		}
 	}
 	matchedB := map[*Component]bool{}
 	var unmatchedA []*Component
