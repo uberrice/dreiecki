@@ -168,7 +168,9 @@ func RenderPCB(b *Board, pages []pcbPage, workDir string, opt RenderOptions) (ma
 			continue
 		}
 		stack := &RenderedPage{Layers: make([]*LayerSVG, len(layers))}
+		mu.Lock()
 		rendered[pg.ID] = stack
+		mu.Unlock()
 		for j, l := range layers {
 			plot([]string{l}, filepath.Join(outDir, fmt.Sprintf("%02d-%02d.svg", i, j)), func(rp *RenderedPage) {
 				if rp != nil {
