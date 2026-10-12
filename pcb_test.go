@@ -2,6 +2,7 @@ package main
 
 import (
 	"io/fs"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -16,7 +17,15 @@ func (m memSource) ReadFile(rel string) ([]byte, error) {
 	return nil, fs.ErrNotExist
 }
 func (m memSource) ListDir(string) ([]string, error) { return nil, nil }
-func (m memSource) Info() RevInfo                    { return RevInfo{} }
+func (m memSource) ListFiles() ([]string, error) {
+	var files []string
+	for file := range m {
+		files = append(files, file)
+	}
+	sort.Strings(files)
+	return files, nil
+}
+func (m memSource) Info() RevInfo { return RevInfo{} }
 
 // A KiCad 8 style board; {NETS}, {GND}, {AT} and {VIA} are substituted per test.
 const boardTmpl = `(kicad_pcb (version 20240108) (generator "pcbnew")

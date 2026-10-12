@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -386,25 +385,15 @@ func findRootFile(repo, cwd, explicit, ext string, srcs ...Source) (string, erro
 	// Otherwise exactly one project in the repo at either revision.
 	for _, src := range srcs {
 		var found []string
-		var walk func(dir string, depth int)
-		walk = func(dir string, depth int) {
-			if depth > 6 {
-				return
-			}
-			names, err := src.ListDir(dir)
-			if err != nil {
-				return
-			}
-			for _, n := range names {
-				rel := path.Join(dir, n)
-				if strings.HasSuffix(n, ".kicad_pro") {
-					found = append(found, strings.TrimSuffix(rel, ".kicad_pro")+ext)
-				} else if !strings.HasPrefix(n, ".") && !strings.Contains(n, ".") {
-					walk(rel, depth+1)
-				}
+		files, err := src.ListFiles()
+		if err != nil {
+			return "", fmt.Errorf("listing project files: %w", err)
+		}
+		for _, rel := range files {
+			if strings.HasSuffix(rel, ".kicad_pro") {
+				found = append(found, strings.TrimSuffix(rel, ".kicad_pro")+ext)
 			}
 		}
-		walk(".", 0)
 		if len(found) == 1 {
 			return found[0], nil
 		}
