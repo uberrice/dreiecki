@@ -53,6 +53,35 @@ func TestSchematicHierarchyAndInstanceReferences(t *testing.T) {
 	}
 }
 
+func TestSchematicLibraryMetadataAndGeometry(t *testing.T) {
+	const body = `(lib_symbols (symbol "Device:R"
+  (property "Description" "old") (property "ki_keywords" "resistor")
+  (symbol "R_0_1" (rectangle (start -1 -2) (end 1 2)))
+  (symbol "R_1_1" (pin passive line (at 0 3 90) (length 1) (name "~") (number "1")))))
+  (symbol (uuid part) (lib_id "Device:R") (unit 1) (property "Reference" "R1"))`
+	_, a := schematic(t, body)
+	for _, tc := range []struct {
+		name, old, new string
+		changed        bool
+	}{
+		{"description", `"old"`, `"new"`, false},
+		{"keywords", `"resistor"`, `"passive"`, false},
+		{"pin", "(length 1)", "(length 2)", true},
+		{"graphic", "(end 1 2)", "(end 2 2)", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, b := schematic(t, strings.ReplaceAll(body, tc.old, tc.new))
+			ch := diffComponents(a.Components, b.Components)
+			if !tc.changed && len(ch) != 0 {
+				t.Fatalf("metadata reported as geometry: %+v", ch)
+			}
+			if tc.changed && (len(ch) != 1 || strings.Join(ch[0].Details, ";") != "Library symbol definition updated (pins/graphics)") {
+				t.Fatalf("missing geometry change: %+v", ch)
+			}
+		})
+	}
+}
+
 func TestComponentsWithoutUUIDs(t *testing.T) {
 	const body = `(symbol (lib_id "Device:R") (unit 1) (property "Reference" "R1") (property "Value" "10k"))
   (symbol (lib_id "Device:R") (unit 1) (property "Reference" "R2") (property "Value" "20k"))`

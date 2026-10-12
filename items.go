@@ -25,7 +25,7 @@ type Component struct {
 	PropOrder []string
 	FieldPos  string // serialized positions of all fields, for detecting cosmetic moves
 	Flags     map[string]string
-	LibDef    string // serialized embedded library symbol, for detecting symbol updates
+	LibDef    string // serialized pins and graphics, for detecting symbol updates
 
 	// PCB footprints only.
 	Footprint bool
@@ -97,7 +97,7 @@ func Extract(p *Project, inst *SheetInst) *SheetContent {
 	libDefs := map[string]string{}
 	if ls := sch.Child("lib_symbols"); ls != nil {
 		for _, s := range ls.Children("symbol") {
-			libDefs[s.Arg(0)] = s.String()
+			libDefs[s.Arg(0)] = symbolGeometry(s)
 		}
 	}
 	sc := &SheetContent{}
@@ -268,4 +268,18 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// symbolGeometry excludes library metadata and field defaults from the definition.
+func symbolGeometry(n *Node) string {
+	var parts []string
+	for _, ch := range n.List {
+		switch ch.Head() {
+		case "symbol":
+			parts = append(parts, fmt.Sprintf("(symbol %q %s)", ch.Arg(0), symbolGeometry(ch)))
+		case "pin", "arc", "circle", "rectangle", "polyline", "bezier", "text", "text_box", "image":
+			parts = append(parts, ch.String())
+		}
+	}
+	return strings.Join(parts, " ")
 }
