@@ -32,7 +32,6 @@ type LayerSVG struct {
 	SVG   []byte
 }
 
-var plottedRe = regexp.MustCompile(`Plotted to '([^']+)'`)
 var viewBoxRe = regexp.MustCompile(`viewBox="([-\d.]+) ([-\d.]+) ([\d.]+) ([\d.]+)"`)
 
 // Render plots every page of the project with kicad-cli and returns the SVGs
@@ -61,30 +60,9 @@ func Render(p *Project, workDir string, opt RenderOptions) (map[string]*Rendered
 		return nil, fmt.Errorf("kicad-cli failed: %v\n%s", err, out.String())
 	}
 
-	// kicad-cli names files <root>-<sheet>-<subsheet>.svg; match those first and
-	// fall back to plot order for anything it sanitized differently.
-	var plotted []string
-	for _, m := range plottedRe.FindAllStringSubmatch(out.String(), -1) {
-		plotted = append(plotted, filepath.Base(m[1]))
-	}
-	used := map[string]bool{}
-	assign := map[*SheetInst]string{}
-	for _, s := range p.Sheets {
-		name := strings.Join(append([]string{p.Name}, s.Names...), "-") + ".svg"
-		if _, err := os.Stat(filepath.Join(outDir, name)); err == nil && !used[name] {
-			assign[s], used[name] = name, true
-		}
-	}
-	var spare []string
-	for _, f := range plotted {
-		if !used[f] {
-			spare = append(spare, f)
-		}
-	}
-	for _, s := range p.Sheets {
-		if _, ok := assign[s]; !ok && len(spare) > 0 {
-			assign[s], spare = spare[0], spare[1:]
-		}
+	assign, err := matchSheetSVGs(p, outDir)
+	if err != nil {
+		return nil, err
 	}
 
 	pages := map[string]*RenderedPage{}
@@ -202,4 +180,33 @@ func RenderPCB(b *Board, pages []pcbPage, workDir string, opt RenderOptions) (ma
 	}
 	wg.Wait()
 	return rendered, first
+}
+
+// Match KiCad's hierarchy filenames, including its separator sanitization.
+// Never infer a sheet's identity from directory order or localized CLI output.
+func matchSheetSVGs(p *Project, dir string) (map[*SheetInst]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	files := map[string]bool{}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".svg") {
+			files[e.Name()] = true
+		}
+	}
+	assigned := map[*SheetInst]string{}
+	used := map[string]bool{}
+	for _, sheet := range p.Sheets {
+		name := strings.Join(append([]string{p.Name}, sheet.Names...), "-")
+		name = strings.NewReplacer("/", "_", "\\", "_").Replace(name) + ".svg"
+		if !files[name] {
+			return nil, fmt.Errorf("no SVG matching sheet %s (expected %q)", sheet.DisplayName(), name)
+		}
+		if used[name] {
+			return nil, fmt.Errorf("ambiguous SVG filename %q for sheet %s", name, sheet.DisplayName())
+		}
+		assigned[sheet], used[name] = name, true
+	}
+	return assigned, nil
 }
