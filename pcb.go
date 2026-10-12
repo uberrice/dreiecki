@@ -334,7 +334,11 @@ func (b *Board) footprint(n *Node) *Component {
 			c.PadOrder = append(c.PadOrder, k)
 		}
 		var sb strings.Builder
-		b.write(&sb, relAngle(ch, c.Rot), h == "pad")
+		geometry := relAngle(ch, c.Rot)
+		if h == "pad" {
+			geometry = withoutChildren(geometry, "pintype", "pinfunction")
+		}
+		b.write(&sb, geometry, h == "pad")
 		geom = append(geom, sb.String())
 	}
 	c.FieldPos = strings.Join(fieldPos, ";")
@@ -360,7 +364,7 @@ func hasAtom(n *Node, a string) bool {
 // Footprint children that are placement or metadata rather than geometry.
 var fpMeta = map[string]bool{
 	"at": true, "layer": true, "path": true, "sheetname": true, "sheetfile": true, "attr": true, "locked": true,
-	"uuid": true, "tstamp": true, "descr": true, "tags": true, "placed": true, "tedit": true,
+	"uuid": true, "tstamp": true, "descr": true, "tags": true, "placed": true, "tedit": true, "model": true,
 }
 
 // relAngle makes a footprint child's (at x y angle) relative to the footprint

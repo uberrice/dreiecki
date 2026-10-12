@@ -172,3 +172,19 @@ func (p *parser) parse() (*Node, error) {
 		return &Node{Atom: p.src[start:p.pos]}, nil
 	}
 }
+
+// withoutChildren returns a shallow copy excluding the named child lists.
+func withoutChildren(n *Node, heads ...string) *Node {
+	out := *n
+	out.List = nil
+	for _, ch := range n.List {
+		skip := false
+		for _, h := range heads {
+			skip = skip || ch.IsList && ch.Head() == h
+		}
+		if !skip {
+			out.List = append(out.List, ch)
+		}
+	}
+	return &out
+}
