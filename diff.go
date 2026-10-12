@@ -292,9 +292,7 @@ func itemTitle(it *Item) string {
 	name := strings.ReplaceAll(it.Kind, "_", " ")
 	if it.Text != "" {
 		t := strings.Join(strings.Fields(it.Text), " ")
-		if len(t) > 40 {
-			t = t[:40] + "…"
-		}
+		t = truncateTitle(t)
 		return fmt.Sprintf("%s “%s”", name, t)
 	}
 	return name
@@ -404,4 +402,12 @@ func splitRef(r string) (string, int) {
 	n := 0
 	fmt.Sscanf(r[i:], "%d", &n)
 	return r[:i], n
+}
+
+func truncateTitle(s string) string {
+	r := []rune(s)
+	if len(r) > 40 {
+		return string(r[:40]) + "…"
+	}
+	return s
 }

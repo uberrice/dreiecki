@@ -493,9 +493,7 @@ func (b *Board) item(n *Node) *Item {
 	}
 	if it.Text != "" {
 		t := strings.Join(strings.Fields(it.Text), " ")
-		if len(t) > 40 {
-			t = t[:40] + "…"
-		}
+		t = truncateTitle(t)
 		name += " “" + t + "”"
 	}
 	if net := it.Attrs["Net"]; net != "" {
