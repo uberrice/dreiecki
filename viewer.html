@@ -341,13 +341,14 @@ async function unpack(b64) {
   const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   const stream = new Blob([bin]).stream().pipeThrough(new DecompressionStream("gzip"));
   const text = await new Response(stream).text();
-  return URL.createObjectURL(new Blob([text], { type: "image/svg+xml" }));
+  return loadImg(URL.createObjectURL(new Blob([text], { type: "image/svg+xml" })));
 }
 async function loadImg(url) {
   if (!url) return null;
   const i = new Image();
   i.src = url;
   try { await i.decode(); } catch { return null; }
+  finally { URL.revokeObjectURL(url); }
   return i;
 }
 // Draw one side of a page: an SVG image, or a stack of per-layer images bottom to top. Stacks use
@@ -379,11 +380,13 @@ function rasterize(cv, ctx, src, page, sc, ox, oy, plain) {
 
 const pixSrc = document.getElementById("pixcode").textContent;
 let worker = null;
-try {
-  worker = new Worker(URL.createObjectURL(new Blob([pixSrc +
+const workerURL = URL.createObjectURL(new Blob([pixSrc +
     "\nonmessage = (e) => { const r = analyseBuffers(e.data); postMessage(Object.assign(r, { id: e.data.id }), [r.washRem.buffer, r.washAdd.buffer, r.diff.buffer]); };"],
-    { type: "text/javascript" })));
+    { type: "text/javascript" }));
+try {
+  worker = new Worker(workerURL);
 } catch { worker = null; }
+finally { URL.revokeObjectURL(workerURL); }
 const pending = new Map();
 let jobSeq = 0;
 if (worker) {
@@ -410,11 +413,10 @@ function loadPage(i) {
     const p = DATA.pages[i];
     if (p.stack) {
       const side = async (k) => ({ layers: await Promise.all(p.stack.map(async (l) =>
-        ({ layer: l.layer, copper: l.copper, img: await loadImg(await unpack(l[k])) }))) });
+        ({ layer: l.layer, copper: l.copper, img: await unpack(l[k]) }))) });
       [r.imgA, r.imgB] = await Promise.all([side("svgA"), side("svgB")]);
     } else {
-      const [ua, ub] = await Promise.all([unpack(p.svgA), unpack(p.svgB)]);
-      [r.imgA, r.imgB] = await Promise.all([loadImg(ua), loadImg(ub)]);
+      [r.imgA, r.imgB] = await Promise.all([unpack(p.svgA), unpack(p.svgB)]);
     }
     await rasterPage(i, r);
   })();
