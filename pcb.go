@@ -624,7 +624,11 @@ func diffBoard(a, b *Board) []Change {
 	for _, s := range []struct{ head, title string }{
 		{"paper", "Page settings"}, {"general", "Board thickness"}, {"layers", "Layer table"}, {"setup", "Board setup / stackup"},
 	} {
-		if a.canon(orEmpty(a.Node.Child(s.head))) != b.canon(orEmpty(b.Node.Child(s.head))) {
+		na, nb := orEmpty(a.Node.Child(s.head)), orEmpty(b.Node.Child(s.head))
+		if s.head == "setup" {
+			na, nb = withoutChildren(na, "pcbplotparams"), withoutChildren(nb, "pcbplotparams")
+		}
+		if a.canon(na) != b.canon(nb) {
 			changes = append(changes, Change{Category: "board", Op: "changed", Title: s.title})
 		}
 	}
