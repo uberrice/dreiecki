@@ -98,3 +98,38 @@ func TestPCBViaLayersAndPages(t *testing.T) {
 		t.Errorf("pages: %s", got)
 	}
 }
+
+func TestPCBMetadataIsNotGeometry(t *testing.T) {
+	const body = `(kicad_pcb (layers (0 "F.Cu" signal))
+  (footprint "Test" (layer "F.Cu") (uuid fp) (at 1 1)
+   (property "Reference" "U1")
+   (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu")
+    (pinfunction "IN") (pintype "input"))
+   (model "old.step" (offset (xyz 0 0 0)))))`
+	load := func(s string) *Board {
+		b, err := LoadBoard(memSource{"b.kicad_pcb": s}, "b.kicad_pcb")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	a := load(body)
+	for _, tc := range []struct {
+		old, new string
+		changed  bool
+	}{
+		{`"old.step"`, `"new.step"`, false},
+		{`(xyz 0 0 0)`, `(xyz 1 0 0)`, false},
+		{`"IN"`, `"OUT"`, false},
+		{`"input"`, `"output"`, false},
+		{`(size 1 1)`, `(size 2 1)`, true},
+	} {
+		ch := boardChanges(a, load(strings.ReplaceAll(body, tc.old, tc.new)))
+		if !tc.changed && len(ch) != 0 {
+			t.Errorf("%s: %+v", tc.old, ch)
+		}
+		if tc.changed && (len(ch) != 1 || strings.Join(ch[0].Details, ";") != "Footprint geometry changed (pads/graphics)") {
+			t.Errorf("geometry change: %+v", ch)
+		}
+	}
+}
