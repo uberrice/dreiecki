@@ -133,3 +133,19 @@ func TestPCBMetadataIsNotGeometry(t *testing.T) {
 		}
 	}
 }
+
+func TestPCBPlotSettingsAreNotSetup(t *testing.T) {
+	load := func(width, format string) *Board {
+		b, err := LoadBoard(memSource{"b.kicad_pcb": `(kicad_pcb (setup (pad_to_mask_clearance ` + width + `) (pcbplotparams (outputformat ` + format + `))))`}, "b.kicad_pcb")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	if ch := diffBoard(load("0", "1"), load("0", "2")); len(ch) != 0 {
+		t.Fatal(ch)
+	}
+	if ch := diffBoard(load("0", "1"), load("0.1", "1")); len(ch) != 1 || ch[0].Title != "Board setup / stackup" {
+		t.Fatal(ch)
+	}
+}
