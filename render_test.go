@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,6 +75,33 @@ func TestRenderRejectsMissingOrAmbiguousSheets(t *testing.T) {
 				t.Fatalf("want %s, got %v", tc.want, err)
 			}
 		})
+	}
+}
+
+func TestRenderPCBStackAfterSinglePages(t *testing.T) {
+	cli := fakeCLI(t, `printf '%s' '<svg viewBox="0 0 100 80"></svg>' > "$out"`)
+	b := board(t)
+	// Launch single-page workers before inserting stacks in the shared map.
+	var pages []pcbPage
+	for i := 0; i < 20; i++ {
+		pages = append(pages, pcbPage{ID: fmt.Sprint(i), Layer: "F.Cu", Layers: []string{"F.Cu"}})
+		pages = append(pages, pcbPage{ID: fmt.Sprint("stack", i), Stack: true, Layers: []string{"F.Cu", "B.Cu"}})
+	}
+	rendered, err := RenderPCB(b, pages, t.TempDir(), RenderOptions{KicadCLI: cli})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rendered) != len(pages) {
+		t.Fatalf("got %d pages, want %d", len(rendered), len(pages))
+	}
+	for _, p := range pages {
+		rp := rendered[p.ID]
+		if rp == nil || rp.Width != 100 || rp.Height != 80 {
+			t.Fatalf("page %s: %+v", p.ID, rp)
+		}
+		if p.Stack && (len(rp.Layers) != 2 || rp.Layers[0] == nil || rp.Layers[1] == nil) {
+			t.Fatalf("stack %s: %+v", p.ID, rp.Layers)
+		}
 	}
 }
 
