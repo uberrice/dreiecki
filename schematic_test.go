@@ -120,3 +120,20 @@ func TestUTF8Titles(t *testing.T) {
 		}
 	}
 }
+
+func TestSchematicFieldVisibility(t *testing.T) {
+	const body = `(symbol (uuid part) (lib_id "Device:R") (unit 1)
+  (property "Reference" "R1" (at 10 10 0))
+  (property "Value" "10k" (at 10 12 0) %s))`
+	_, a := schematic(t, strings.ReplaceAll(body, "%s", `(effects (font (size 1 1)))`))
+	for _, hidden := range []string{`(hide yes)`, `(hide)`, `hide`, `(effects (font (size 1 1)) hide)`, `(effects (font (size 1 1)) (hide yes))`} {
+		_, b := schematic(t, strings.ReplaceAll(body, "%s", hidden))
+		if ch := diffComponents(a.Components, b.Components); len(ch) != 1 || ch[0].Op != "moved" || strings.Join(ch[0].Details, ";") != "Field text placement/visibility changed" {
+			t.Errorf("%s: %+v", hidden, ch)
+		}
+	}
+	_, b := schematic(t, strings.ReplaceAll(body, "%s", `(effects (font (size 1 1)) (hide no))`))
+	if ch := diffComponents(a.Components, b.Components); len(ch) != 0 {
+		t.Fatal(ch)
+	}
+}
