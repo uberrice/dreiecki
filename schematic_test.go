@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func schematic(t *testing.T, body string) (*Project, *SheetContent) {
@@ -93,5 +94,29 @@ func TestComponentsWithoutUUIDs(t *testing.T) {
 	_, b = schematic(t, strings.ReplaceAll(body, `"20k"`, `"22k"`))
 	if ch := diffComponents(a.Components, b.Components); len(ch) != 1 || ch[0].Title != "R2" || ch[0].Op != "changed" {
 		t.Fatalf("reference matching: %+v", ch)
+	}
+}
+
+func TestUTF8Titles(t *testing.T) {
+	for _, suffix := range []string{"µ", "Ω", "ä"} {
+		for _, count := range []int{0, 39, 40, 41} {
+			text := strings.Repeat("x", count) + suffix
+			want := text
+			if count >= 40 {
+				want = strings.Repeat("x", 40) + "…"
+			}
+			title := itemTitle(&Item{Kind: "label", Text: text})
+			if !utf8.ValidString(title) || title != "label “"+want+"”" {
+				t.Errorf("schematic title: %q", title)
+			}
+			n, err := ParseSexpr(`(gr_text "` + text + `" (at 0 0) (layer "F.SilkS"))`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			title = board(t).item(n).Title
+			if !utf8.ValidString(title) || title != "text “"+want+"” (F.Silkscreen)" {
+				t.Errorf("PCB title: %q", title)
+			}
+		}
 	}
 }
