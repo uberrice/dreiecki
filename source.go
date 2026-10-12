@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -15,6 +16,7 @@ import (
 type Source interface {
 	ReadFile(rel string) ([]byte, error)
 	ListDir(rel string) ([]string, error)
+	ListFiles() ([]string, error)
 	Info() RevInfo
 }
 
@@ -116,4 +118,36 @@ func cleanRel(p string) (string, error) {
 		return "", fmt.Errorf("path %q is outside the repository", p)
 	}
 	return c, nil
+}
+
+// ListFiles lists a revision with one recursive tree query. NUL delimiters preserve
+// paths containing tabs, newlines, or characters git would otherwise quote.
+func (g *gitSource) ListFiles() ([]string, error) {
+	out, err := git(g.repo, "ls-tree", "-r", "--name-only", "-z", g.commit)
+	if err != nil {
+		return nil, err
+	}
+	return strings.FieldsFunc(string(out), func(r rune) bool { return r == 0 }), nil
+}
+
+func (w *workSource) ListFiles() ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(w.root, func(p string, e fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if e.IsDir() {
+			if e.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(w.root, p)
+		if err != nil {
+			return err
+		}
+		files = append(files, filepath.ToSlash(rel))
+		return nil
+	})
+	return files, err
 }
