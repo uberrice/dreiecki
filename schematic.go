@@ -70,6 +70,15 @@ func LoadProject(src Source, rootRel string) (*Project, error) {
 	if err := p.walk(src, root, rootRel, "/"+rootUUID, nil, 0); err != nil {
 		return nil, err
 	}
+	// KiCad 6 stores all page numbers on the root, with paths excluding its UUID.
+	for _, pth := range root.Child("sheet_instances").Children("path") {
+		for _, sheet := range p.Sheets {
+			legacyPath := strings.TrimPrefix(sheet.UUIDPath, "/"+rootUUID)
+			if sheet.Page == "" && (pth.Arg(0) == legacyPath || pth.Arg(0) == sheet.UUIDPath) {
+				sheet.Page = pth.Child("page").Arg(0)
+			}
+		}
+	}
 	sort.SliceStable(p.Sheets, func(i, j int) bool {
 		return pageLess(p.Sheets[i].Page, p.Sheets[j].Page)
 	})

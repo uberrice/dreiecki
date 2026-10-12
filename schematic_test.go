@@ -54,6 +54,30 @@ func TestSchematicHierarchyAndInstanceReferences(t *testing.T) {
 	}
 }
 
+func TestSchematicLegacyPageNumbers(t *testing.T) {
+	src := memSource{
+		"root.kicad_sch": `(kicad_sch (uuid root)
+   (sheet (uuid a) (property "Sheetname" "A") (property "Sheetfile" "child.kicad_sch"))
+   (sheet (uuid b) (property "Sheetname" "B") (property "Sheetfile" "child.kicad_sch"))
+   (sheet_instances (path "/" (page "1")) (path "/a" (page "10"))
+    (path "/b" (page "2")) (path "/b/nested" (page "3")) (path "/a/nested" (page "11"))))`,
+		"child.kicad_sch": `(kicad_sch (uuid child) (sheet (uuid nested)
+   (property "Sheetname" "Nested") (property "Sheetfile" "leaf.kicad_sch")))`,
+		"leaf.kicad_sch": `(kicad_sch (uuid leaf))`,
+	}
+	p, err := LoadProject(src, "root.kicad_sch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pages []string
+	for _, s := range p.Sheets {
+		pages = append(pages, s.Key()+"="+s.Page)
+	}
+	if got := strings.Join(pages, ","); got != "/root=1,/root/b=2,/root/b/nested=3,/root/a=10,/root/a/nested=11" {
+		t.Fatal(got)
+	}
+}
+
 func TestSchematicLibraryMetadataAndGeometry(t *testing.T) {
 	const body = `(lib_symbols (symbol "Device:R"
   (property "Description" "old") (property "ki_keywords" "resistor")
@@ -121,6 +145,8 @@ func TestUTF8Titles(t *testing.T) {
 	}
 }
 
+// KiCad 8 stores (hide yes) inside effects, as in its video demo:
+// https://github.com/KiCad/kicad-source-mirror/blob/8.0/demos/video/video.kicad_sch
 func TestSchematicFieldVisibility(t *testing.T) {
 	const body = `(symbol (uuid part) (lib_id "Device:R") (unit 1)
   (property "Reference" "R1" (at 10 10 0))
