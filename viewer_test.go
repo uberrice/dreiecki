@@ -51,3 +51,13 @@ global.Image = class {
 		t.Fatalf("SVG URL lifecycle: %v\n%s", err, out)
 	}
 }
+
+func TestViewerPerformanceRegressions(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	if out, err := exec.Command(node, "viewer_perf_test.js").CombinedOutput(); err != nil {
+		t.Fatalf("viewer performance regressions: %v\n%s", err, out)
+	}
+}

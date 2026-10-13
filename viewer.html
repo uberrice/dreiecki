@@ -278,8 +278,9 @@ function diffPixels(a, b, out, w, h, wash) {
 }
 
 // Whole-page analysis at overview resolution: change masks, areas, and the diff overview image.
-// da/db, if given, are what is displayed (e.g. translucent copper); the diff image is made from them.
-function analyseBuffers({ a, b, da, db, W, H, R }) {
+// Cached analysis preserves default-look regions while appearance changes only recomposite pixels.
+function analyseBuffers({ a, b, W, H, R, analysis }) {
+  if (analysis) return compositeBuffers(a, b, W, H, analysis);
   const n = W * H, rem = new Uint8Array(n), add = new Uint8Array(n);
   let changed = 0;
   for (let i = 0, j = 0; i < n; i++, j += 4) {
@@ -291,9 +292,13 @@ function analyseBuffers({ a, b, da, db, W, H, R }) {
   const regions = findRegions(rem, add, W, H, R);
   const wr = Math.max(1, Math.round(0.8 * R));
   const washRem = dilate(rem, W, H, wr), washAdd = dilate(add, W, H, wr);
-  const diff = new Uint8ClampedArray(n * 4);
+  return compositeBuffers(a, b, W, H, { regions, washRem, washAdd, changed });
+}
+function compositeBuffers(a, b, W, H, analysis) {
+  const { regions, washRem, washAdd, changed } = analysis;
+  const diff = new Uint8ClampedArray(W * H * 4);
   const xs = new Int32Array(W).map((_, i) => i), ys = new Int32Array(H).map((_, i) => i);
-  diffPixels(da || a, db || b, diff, W, H, { rem: washRem, add: washAdd, W, xs, ys });
+  diffPixels(a, b, diff, W, H, { rem: washRem, add: washAdd, W, xs, ys });
   return { regions, washRem, washAdd, diff, changed };
 }
 </script>
@@ -353,12 +358,12 @@ async function loadImg(url) {
 }
 // Draw one side of a page: an SVG image, or a stack of per-layer images bottom to top. Stacks use
 // the chosen top layer and copper opacity, or with plain the default look (opaque, front on top).
-function paint(ctx, src, x, y, w, h, plain) {
+function paint(ctx, src, x, y, w, h, plain, look = state) {
   if (!src) return;
   if (!src.layers) { ctx.drawImage(src, x, y, w, h); return; }
-  for (const l of stackOrder(src.layers, plain ? null : state.top)) {
+  for (const l of stackOrder(src.layers, plain ? null : look.top)) {
     if (!l.img) continue;
-    ctx.globalAlpha = l.copper && !plain ? state.opacity : 1;
+    ctx.globalAlpha = l.copper && !plain ? look.opacity : 1;
     ctx.drawImage(l.img, x, y, w, h);
   }
   ctx.globalAlpha = 1;
@@ -371,10 +376,10 @@ function stackOrder(layers, top) {
   return [...cu, ...rest];
 }
 // Draw a page side into a w×h canvas, page origin at (-ox, -oy), sc px per mm.
-function rasterize(cv, ctx, src, page, sc, ox, oy, plain) {
+function rasterize(cv, ctx, src, page, sc, ox, oy, plain, readback = true, look = state) {
   ctx.clearRect(0, 0, cv.width, cv.height);
-  paint(ctx, src, -ox, -oy, page.width * sc, page.height * sc, plain);
-  const data = ctx.getImageData(0, 0, cv.width, cv.height).data;
+  paint(ctx, src, -ox, -oy, page.width * sc, page.height * sc, plain, look);
+  const data = readback ? ctx.getImageData(0, 0, cv.width, cv.height).data : null;
   return { bmp: cv.transferToImageBitmap(), data };
 }
 
@@ -387,21 +392,55 @@ try {
   worker = new Worker(workerURL);
 } catch { worker = null; }
 finally { URL.revokeObjectURL(workerURL); }
+// One active worker job; queued jobs retain only their page's newest appearance.
 const pending = new Map();
-let jobSeq = 0;
+let jobSeq = 0, activeJob = null;
+function finishAnalysis(result) {
+  const job = activeJob;
+  activeJob = null;
+  if (job) job.resolve(result);
+  dispatchAnalysis();
+}
+function dispatchAnalysis() {
+  if (activeJob || !pending.size) return;
+  const [key, job] = pending.entries().next().value;
+  pending.delete(key);
+  activeJob = job;
+  if (!worker) {
+    Promise.resolve().then(() => { const msg = job.makeMessage(); return msg ? analyseBuffers(msg) : null; }).then(finishAnalysis, (error) => {
+      activeJob = null; job.reject(error); dispatchAnalysis();
+    });
+    return;
+  }
+  try {
+    const msg = job.makeMessage();
+    if (!msg) { finishAnalysis(null); return; }
+    // Readback arrays are disposable. The producer recreates them if the worker fails.
+    const buffers = [...new Set([msg.a.buffer, msg.b.buffer])];
+    worker.postMessage(Object.assign({ id: job.id }, msg), buffers);
+  } catch {
+    worker.terminate(); worker = null;
+    activeJob = null; pending.set(key, job); dispatchAnalysis();
+  }
+}
 if (worker) {
-  worker.onmessage = (e) => { const p = pending.get(e.data.id); pending.delete(e.data.id); p.resolve(e.data); };
-  worker.onerror = () => { // e.g. workers blocked: finish everything in the page instead
-    worker = null;
-    for (const [id, p] of pending) { pending.delete(id); p.resolve(analyseBuffers(p.msg)); }
+  worker.onmessage = (e) => { if (activeJob && e.data.id === activeJob.id) finishAnalysis(e.data); };
+  worker.onerror = () => {
+    worker.terminate(); worker = null;
+    const job = activeJob;
+    if (job) {
+      // Recreate transferred input rather than keeping another complete pixel copy.
+      Promise.resolve().then(() => { const msg = job.makeMessage(); return msg ? analyseBuffers(msg) : null; })
+        .then(finishAnalysis, (error) => { activeJob = null; job.reject(error); dispatchAnalysis(); });
+    } else dispatchAnalysis();
   };
 }
-function runAnalysis(msg) {
-  if (!worker) return Promise.resolve(analyseBuffers(msg));
-  return new Promise((resolve) => {
-    const id = ++jobSeq;
-    pending.set(id, { resolve, msg });
-    worker.postMessage(Object.assign({ id }, msg)); // copied, so the fallback still has the data
+function runAnalysis(key, makeMessage) {
+  return new Promise((resolve, reject) => {
+    const previous = pending.get(key);
+    if (previous) previous.resolve(null);
+    pending.set(key, { id: ++jobSeq, makeMessage, resolve, reject });
+    dispatchAnalysis();
   });
 }
 
@@ -413,10 +452,10 @@ function loadPage(i) {
     const p = DATA.pages[i];
     if (p.stack) {
       const side = async (k) => ({ layers: await Promise.all(p.stack.map(async (l) =>
-        ({ layer: l.layer, copper: l.copper, img: await unpack(l[k]) }))) });
+        ({ layer: l.layer, copper: l.copper, img: await unpack(VIEW && k === "svgA" ? null : l[k]) }))) });
       [r.imgA, r.imgB] = await Promise.all([side("svgA"), side("svgB")]);
     } else {
-      [r.imgA, r.imgB] = await Promise.all([unpack(p.svgA), unpack(p.svgB)]);
+      [r.imgA, r.imgB] = await Promise.all([unpack(VIEW ? null : p.svgA), unpack(p.svgB)]);
     }
     await rasterPage(i, r);
   })();
@@ -435,26 +474,52 @@ function loadPage(i) {
 // so a hidden or faint layer doesn't hide its changes; the diff image shows what is displayed.
 async function rasterPage(i, r) {
   const p = DATA.pages[i], gen = (r.gen = (r.gen || 0) + 1);
+  const look = { top: state.top, opacity: state.opacity };
   const R = Math.min(6, 3000 / Math.max(p.width, p.height));
   const W = Math.round(p.width * R), H = Math.round(p.height * R);
-  const cv = new OffscreenCanvas(W, H), ctx = cv.getContext("2d", { willReadFrequently: true });
-  const ra = rasterize(cv, ctx, r.imgA, p, R, 0, 0), rb = rasterize(cv, ctx, r.imgB, p, R, 0, 0);
-  const custom = !!p.stack && !plainLook(p);
-  if (!custom) r.plain = { a: ra.data, b: rb.data };
-  else if (!r.plain) {
-    const pa = rasterize(cv, ctx, r.imgA, p, R, 0, 0, true), pb = rasterize(cv, ctx, r.imgB, p, R, 0, 0, true);
-    pa.bmp.close(); pb.bmp.close();
-    r.plain = { a: pa.data, b: pb.data };
+  const cv = new OffscreenCanvas(W, H), ctx = cv.getContext("2d", { willReadFrequently: !VIEW });
+  if (VIEW) {
+    const rb = rasterize(cv, ctx, r.imgB, p, R, 0, 0, false, false);
+    const old = r.ov;
+    r.ov = { b: rb.bmp, R };
+    if (old) for (const k of ["a", "b", "d"]) if (old[k]) old[k].close();
+    requestDraw();
+    return;
   }
-  const plain = r.plain;
-  if (!p.stack) r.plain = null; // only stacked pages are drawn again
+  const ra = rasterize(cv, ctx, r.imgA, p, R, 0, 0, false, false);
+  const rb = rasterize(cv, ctx, r.imgB, p, R, 0, 0, false, false);
   const old = r.ov;
   r.ov = { a: ra.bmp, b: rb.bmp, d: old ? old.d : null, R };
   if (old) { old.a.close(); old.b.close(); }
   requestDraw();
-  if (VIEW) return; // nothing to compare
-  const res = await runAnalysis({ a: plain.a, b: plain.b, da: custom ? ra.data : null, db: custom ? rb.data : null, W, H, R });
-  if (r.gen !== gen || rt.get(i) !== r) return; // superseded or evicted
+  // Queue producers instead of allocating readbacks for work superseded before dispatch.
+  const invariant = r.an;
+  const displayedPixels = (bmp) => {
+    ctx.clearRect(0, 0, W, H); ctx.drawImage(bmp, 0, 0);
+    return ctx.getImageData(0, 0, W, H).data;
+  };
+  const makeMessage = () => {
+    if (r.gen !== gen || rt.get(i) !== r) return null;
+    const custom = !!p.stack && !plainLook(p, look);
+    const side = (src, bmp) => {
+      if (invariant || !custom) return displayedPixels(bmp);
+      const render = rasterize(cv, ctx, src, p, R, 0, 0, true, true, look);
+      render.bmp.close();
+      return render.data;
+    };
+    return { a: side(r.imgA, ra.bmp), b: side(r.imgB, rb.bmp), W, H, R, analysis: invariant };
+  };
+  let res = await runAnalysis(i, makeMessage);
+  if (!res || r.gen !== gen || rt.get(i) !== r) return;
+  if (!invariant && p.stack && !plainLook(p, look)) {
+    // Cache the default-look analysis; only the displayed diff depends on copper controls.
+    r.an = { R, W, H, washRem: res.washRem, washAdd: res.washAdd, regions: res.regions, changed: res.changed };
+    res = await runAnalysis(i, () => {
+      if (r.gen !== gen || rt.get(i) !== r) return null;
+      return { a: displayedPixels(ra.bmp), b: displayedPixels(rb.bmp), W, H, R, analysis: r.an };
+    });
+  }
+  if (!res || r.gen !== gen || rt.get(i) !== r) return;
   r.an = { R, W, H, washRem: res.washRem, washAdd: res.washAdd, regions: res.regions, changed: res.changed };
   const d = await createImageBitmap(new ImageData(res.diff, W, H));
   if (r.gen !== gen || rt.get(i) !== r) { d.close(); return; }
@@ -462,9 +527,9 @@ async function rasterPage(i, r) {
   r.ov.d = d;
   requestDraw();
 }
-function plainLook(p) {
+function plainLook(p, look = state) {
   const cu = p.stack.filter((l) => l.copper);
-  return state.opacity >= 1 && (!cu.length || cu[0].layer === state.top || !cu.some((l) => l.layer === state.top));
+  return look.opacity >= 1 && (!cu.length || cu[0].layer === look.top || !cu.some((l) => l.layer === look.top));
 }
 
 // ---------- tile cache ----------
@@ -475,6 +540,7 @@ const tiles = new Map();
 const tileCv = new OffscreenCanvas(TILE, TILE), tileCtx = tileCv.getContext("2d", { willReadFrequently: true });
 const tileCv2 = new OffscreenCanvas(TILE, TILE), tileCtx2 = tileCv2.getContext("2d");
 let queue = [], lastInteract = 0;
+const wantedTiles = new Set();
 const stats = { rendered: 0, ms: 0 };
 
 function tileKey(i, L, x, y) { return `${i}|${L}|${x}|${y}`; }
@@ -526,7 +592,9 @@ function pumpTiles() {
     renderTile(t, q.page, q.L, q.x, q.y, q.kind);
     done++;
     while (tiles.size > MAX_TILES) {
-      const [k, old] = tiles.entries().next().value;
+      const entry = [...tiles].find(([k]) => !wantedTiles.has(k));
+      if (!entry) break;
+      const [k, old] = entry;
       closeTile(old); tiles.delete(k);
     }
   }
@@ -548,7 +616,7 @@ let frameReq = false;
 function requestDraw() { if (!frameReq) { frameReq = true; requestAnimationFrame(frame); } }
 function frame() {
   frameReq = false;
-  queue = [];
+  queue = []; wantedTiles.clear();
   draw();
   pumpTiles();
 }
@@ -604,18 +672,32 @@ function drawLayer(ctx, kind, r, p, S, X, Y, cw, ch, prio) {
   }
   ctx.drawImage(r.ov[kind], X, Y, p.width * S, p.height * S);
   if (S <= r.ov.R * 1.15 || (kind === "d" && !r.an)) return; // overview is sharp enough
-  const L = Math.min(MAX_LEVEL, Math.ceil(Math.log2(S)));
+  let L = Math.min(MAX_LEVEL, Math.ceil(Math.log2(S)));
+  // A complete visible level must fit the cache or stationary frames would evict each other.
+  while (L > 0 && visibleTileCount(p, L, S, X, Y, cw, ch) > MAX_TILES) L--;
   for (let l = Math.max(0, L - 3); l <= L; l++) drawTiles(ctx, kind, l, l === L, p, S, X, Y, cw, ch, prio);
+}
+function tileBounds(p, L, S, X, Y, cw, ch) {
+  const sc = 2 ** L, span = TILE * S / sc;
+  return {
+    x0: Math.max(0, Math.floor(-X / span)),
+    x1: Math.min(Math.ceil(p.width * sc / TILE) - 1, Math.floor((cw - X) / span)),
+    y0: Math.max(0, Math.floor(-Y / span)),
+    y1: Math.min(Math.ceil(p.height * sc / TILE) - 1, Math.floor((ch - Y) / span)),
+  };
+}
+function visibleTileCount(p, L, S, X, Y, cw, ch) {
+  const { x0, x1, y0, y1 } = tileBounds(p, L, S, X, Y, cw, ch);
+  return Math.max(0, x1 - x0 + 1) * Math.max(0, y1 - y0 + 1);
 }
 function drawTiles(ctx, kind, L, want, p, S, X, Y, cw, ch, prio) {
   const sc = 2 ** L, k = S / sc; // screen px per tile px
   if (sc <= rt.get(state.page).ov.R) return;
-  const nx = Math.ceil((p.width * sc) / TILE), ny = Math.ceil((p.height * sc) / TILE);
-  const x0 = Math.max(0, Math.floor(-X / (TILE * k))), x1 = Math.min(nx - 1, Math.floor((cw - X) / (TILE * k)));
-  const y0 = Math.max(0, Math.floor(-Y / (TILE * k))), y1 = Math.min(ny - 1, Math.floor((ch - Y) / (TILE * k)));
+  const { x0, x1, y0, y1 } = tileBounds(p, L, S, X, Y, cw, ch);
   const cx = cw / 2, cy = ch / 2;
   for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {
     const key = tileKey(state.page, L, tx, ty), t = tiles.get(key);
+    if (want) wantedTiles.add(key);
     // Snap edges to whole device pixels so neighbouring tiles don't leave hairline seams.
     const sx = Math.round(X + tx * TILE * k), sy = Math.round(Y + ty * TILE * k);
     const ex = Math.round(X + (tx + 1) * TILE * k), ey = Math.round(Y + (ty + 1) * TILE * k);
@@ -850,10 +932,20 @@ function renderPages() {
       el("span", { class: "badge " + p.status }, label)));
   });
 }
+let changesGeneration = 0, changesPage = null;
+const changeCounts = new WeakMap();
 function renderChanges() {
+  const generation = ++changesGeneration;
   const p = DATA.pages[state.page], box = $("#changes");
-  const counts = {};
-  for (const c of p.changes) counts[c.category] = (counts[c.category] || 0) + 1;
+  const scrollTop = changesPage === p ? box.scrollTop : 0;
+  changesPage = p;
+  let restoreScroll = scrollTop > 0;
+  let counts = changeCounts.get(p);
+  if (!counts) {
+    counts = {};
+    for (const c of p.changes) counts[c.category] = (counts[c.category] || 0) + 1;
+    changeCounts.set(p, counts);
+  }
   const f = $("#filters"); f.replaceChildren();
   for (const [cat, name] of Object.entries(CATS)) {
     if (!counts[cat]) continue;
@@ -868,15 +960,25 @@ function renderChanges() {
       "No object-level changes; see highlighted areas for visual differences (e.g. title block)."));
     return;
   }
-  let last = null;
-  for (const c of shown) {
-    if (c.category !== last) { box.append(el("div", { class: "grp" }, CATS[c.category] || c.category)); last = c.category; }
-    const row = el("div", { class: "ch" + (state.selected === c ? " on" : ""), title: c.op, onclick: () => selectChange(c, row) },
-      el("span", { class: "op " + c.op }, OPS[c.op] || "?"),
-      el("div", {}, el("span", { class: "t" }, c.title), c.subtitle ? el("span", { class: "s" }, c.subtitle) : null),
-      c.details && c.details.length ? el("ul", {}, ...c.details.map((d) => el("li", {}, d))) : null);
-    box.append(row);
-  }
+  let last = null, offset = 0;
+  const appendChunk = () => {
+    if (generation !== changesGeneration) return;
+    const fragment = document.createDocumentFragment();
+    const end = Math.min(offset + 100, shown.length), start = offset, started = performance.now();
+    for (; offset < end && (offset === start || performance.now() - started < 6); offset++) {
+      const c = shown[offset];
+      if (c.category !== last) { fragment.append(el("div", { class: "grp" }, CATS[c.category] || c.category)); last = c.category; }
+      const row = el("div", { class: "ch" + (state.selected === c ? " on" : ""), title: c.op, onclick: () => selectChange(c, row) },
+        el("span", { class: "op " + c.op }, OPS[c.op] || "?"),
+        el("div", {}, el("span", { class: "t" }, c.title), c.subtitle ? el("span", { class: "s" }, c.subtitle) : null),
+        c.details && c.details.length ? el("ul", {}, ...c.details.map((d) => el("li", {}, d))) : null);
+      fragment.append(row);
+    }
+    box.append(fragment);
+    if (restoreScroll) { box.scrollTop = scrollTop; restoreScroll = box.scrollTop < scrollTop; }
+    if (offset < shown.length) requestAnimationFrame(appendChunk);
+  };
+  appendChunk();
 }
 function selectChange(c, row) {
   state.selected = c;
