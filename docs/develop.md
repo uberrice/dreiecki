@@ -2,7 +2,7 @@
 
 ## Building
 
-`go build` (Go 1.27.1+). Cross-compile: `GOOS=windows go build`.
+`go build` (Go 1.24+). Cross-compile: `GOOS=windows go build`.
 
 ## CI
 
