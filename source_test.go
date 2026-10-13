@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -29,6 +30,7 @@ func TestFindRootInDottedDeepDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer src.Close()
 	for _, source := range []Source{src, &workSource{root: repo}} {
 		for _, ext := range []string{".kicad_sch", ".kicad_pcb"} {
 			got, err := findRootFile(repo, repo, "", ext, source)
@@ -45,5 +47,57 @@ func TestFindRootRejectsMultipleProjects(t *testing.T) {
 	repo := t.TempDir()
 	if _, err := findRootFile(repo, repo, "", ".kicad_sch", src); err == nil {
 		t.Fatal("multiple projects must require explicit selection")
+	}
+}
+
+func TestGitSourceBatchReadsAndRecovery(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture uses tab and newline filenames")
+	}
+	repo := t.TempDir()
+	contents := map[string]string{"a file\tname.txt": "first\x00\nsecond", "empty": "", "dir/child": "nested", "line\nbreak": "newline"}
+	for name, data := range contents {
+		file := filepath.Join(repo, name)
+		if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte(data), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"}} {
+		if _, err := git(repo, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src, err := newGitSource(repo, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	for _, name := range []string{"a file\tname.txt", "missing with\ttabs", "dir", "empty", "line\nbreak", "dir/child", "a file\tname.txt"} {
+		got, err := src.ReadFile(name)
+		want, exists := contents[name]
+		if !exists {
+			if err == nil {
+				t.Fatalf("expected error for %q", name)
+			}
+			continue
+		}
+		if err != nil || string(got) != want {
+			t.Fatalf("read %q: %q, %v", name, got, err)
+		}
+	}
+	if src.cmd == nil {
+		t.Fatal("batch reader not started")
+	}
+	if err := src.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if src.cmd != nil || src.stdin != nil || src.stdout != nil {
+		t.Fatal("batch reader not closed")
+	}
+	if err := src.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

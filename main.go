@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -152,8 +153,14 @@ func run(refA, refB, rootPath, outPath string, pcb, open, keepTmp bool, opt Rend
 		if srcA, err = makeSource(repo, refA); err != nil {
 			return err
 		}
+		if closer, ok := srcA.(io.Closer); ok {
+			defer closer.Close()
+		}
 		if srcB, err = makeSource(repo, refB); err != nil {
 			return err
+		}
+		if closer, ok := srcB.(io.Closer); ok {
+			defer closer.Close()
 		}
 	}
 	ext := ".kicad_sch"
@@ -188,9 +195,6 @@ func run(refA, refB, rootPath, outPath string, pcb, open, keepTmp bool, opt Rend
 	}
 	if err != nil {
 		return err
-	}
-	if view {
-		rep.stripA()
 	}
 	rep.A, rep.B = srcA.Info(), srcB.Info()
 	if view {
@@ -439,19 +443,10 @@ type StackLayer struct {
 	SvgB   string `json:"svgB,omitempty"`
 }
 
-// stripA turns a report of a revision against itself into a plain view of it.
-func (rep *Report) stripA() {
-	rep.View = true
-	for i := range rep.Pages {
-		p := &rep.Pages[i]
-		p.SvgA, p.Status, p.Changes = "", "same", []Change{}
-		for j := range p.Stack {
-			p.Stack[j].SvgA = ""
-		}
-	}
-}
-
 func buildReport(pa, pb *Project, ra, rb map[string]*RenderedPage) *Report {
+	if pa == pb {
+		return buildSchematicView(pb, rb)
+	}
 	rep := &Report{Kind: "sch"}
 	// Pair sheet instances by uuid path, then by name path.
 	matchA := map[*SheetInst]*SheetInst{}
@@ -541,27 +536,67 @@ var titleRe = regexp.MustCompile(`<title>[^<]*</title>`)
 // stripVolatile removes the export timestamp so identical sheets compare equal.
 func stripVolatile(svg []byte) []byte { return titleRe.ReplaceAll(svg, nil) }
 
+// Writers retain their compression tables between SVGs, but never report buffers.
+var svgWriters = sync.Pool{New: func() any { return gzip.NewWriter(io.Discard) }}
+
 func packSVG(svg []byte) string {
 	var buf bytes.Buffer
-	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	zw := svgWriters.Get().(*gzip.Writer)
+	zw.Reset(&buf)
 	zw.Write(stripVolatile(svg))
 	zw.Close()
+	zw.Reset(io.Discard)
+	svgWriters.Put(zw)
 	return base64.StdEncoding.EncodeToString(buf.Bytes())
 }
 
-func writeReport(rep *Report, out string) error {
-	data, err := json.Marshal(rep)
-	if err != nil {
-		return err
+func buildSchematicView(p *Project, renders map[string]*RenderedPage) *Report {
+	rep := &Report{Kind: "sch", View: true}
+	for i, sheet := range p.Sheets {
+		rp := renders[sheet.Key()]
+		page := PageReport{ID: fmt.Sprintf("p%d", i), Name: sheet.DisplayName(), Page: sheet.Page, File: sheet.File, Status: "same", Changes: []Change{}}
+		if rp != nil {
+			page.Width, page.Height, page.SvgB = rp.Width, rp.Height, packSVG(rp.SVG)
+		}
+		rep.Pages = append(rep.Pages, page)
 	}
+	return rep
+}
+
+func writeReport(rep *Report, out string) error {
 	kind := map[bool]string{false: "Schematic", true: "PCB"}[rep.Kind == "pcb"]
 	title := fmt.Sprintf("%s diff: %s → %s", kind, rep.A.Label, rep.B.Label)
 	if rep.View {
 		title = fmt.Sprintf("%s: %s", kind, rep.B.Label)
 	}
-	html := strings.Replace(viewerHTML, "/*__DATA__*/null", string(data), 1)
-	html = strings.Replace(html, "<title>Schematic diff</title>", "<title>"+escapeHTML(title)+"</title>", 1)
-	return os.WriteFile(out, []byte(html), 0o644)
+	template := strings.Replace(viewerHTML, "<title>Schematic diff</title>", "<title>"+escapeHTML(title)+"</title>", 1)
+	prefix, suffix, ok := strings.Cut(template, "/*__DATA__*/null")
+	if !ok {
+		return fmt.Errorf("viewer data marker missing")
+	}
+	file, err := os.CreateTemp(filepath.Dir(out), ".dreiecki-report-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+	if err = file.Chmod(0o644); err != nil {
+		return err
+	}
+	if _, err = io.WriteString(file, prefix); err != nil {
+		return err
+	}
+	// The default HTML escaping also keeps embedded user text safe in a script.
+	if err = json.NewEncoder(file).Encode(rep); err != nil {
+		return err
+	}
+	if _, err = io.WriteString(file, suffix); err != nil {
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), out)
 }
 
 func escapeHTML(s string) string {

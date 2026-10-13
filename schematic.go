@@ -45,9 +45,6 @@ func LoadProject(src Source, rootRel string) (*Project, error) {
 		Files:  map[string][]byte{},
 		Parsed: map[string]*Node{},
 	}
-	if _, err := src.ReadFile(rootRel); err != nil {
-		return nil, fmt.Errorf("%s does not exist in this revision", rootRel)
-	}
 	root, err := p.parse(src, rootRel)
 	if err != nil {
 		return nil, err
@@ -116,6 +113,9 @@ func (p *Project) loadAux(src Source) error {
 					continue
 				}
 				if rel, err := cleanRel(path.Join(dir, filepath.ToSlash(wks))); err == nil {
+					if _, loaded := p.Files[rel]; loaded {
+						continue
+					}
 					if data, err := src.ReadFile(rel); err == nil {
 						p.Files[rel] = data
 					}

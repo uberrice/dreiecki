@@ -103,6 +103,13 @@ func RenderPCB(b *Board, pages []pcbPage, workDir string, opt RenderOptions) (ma
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return nil, err
 	}
+	// Multi-file plotting numbers drawing-sheet frames differently. Batch only
+	// frame-free reports so layer additions cannot create differences in the frame.
+	if opt.ExcludeDrawSheet {
+		if rendered, ok := renderPCBBatch(b, pages, file, outDir, opt); ok {
+			return rendered, nil
+		}
+	}
 	var (
 		mu       sync.Mutex
 		wg       sync.WaitGroup
@@ -182,6 +189,102 @@ func RenderPCB(b *Board, pages []pcbPage, workDir string, opt RenderOptions) (ma
 	}
 	wg.Wait()
 	return rendered, first
+}
+
+// renderPCBBatch uses one export for overview layers and one for detail layers.
+// Unknown CLI versions, unsupported page shapes or filenames use single plots.
+func renderPCBBatch(b *Board, pages []pcbPage, file, outDir string, opt RenderOptions) (map[string]*RenderedPage, bool) {
+	help, err := exec.Command(opt.KicadCLI, "pcb", "export", "svg", "--help").Output()
+	if err != nil || !bytes.Contains(help, []byte("--mode-multi")) || !bytes.Contains(help, []byte("--common-layers")) {
+		return nil, false
+	}
+	var stackLayers, detailLayers []string
+	for _, pg := range pages {
+		if pg.Layer != "" && !b.has(pg.Layer) {
+			continue
+		}
+		if pg.Stack {
+			for _, l := range pg.Layers {
+				if b.has(l) {
+					stackLayers = union(stackLayers, []string{l})
+				}
+			}
+		} else {
+			// The detail page consists of its own layer and the board outline.
+			if pg.Layer == "" || len(pg.Layers) != 2 || pg.Layers[0] != pg.Layer || pg.Layers[1] != "Edge.Cuts" {
+				return nil, false
+			}
+			detailLayers = union(detailLayers, []string{pg.Layer})
+		}
+	}
+	export := func(layers []string, common, group string) (map[string]*RenderedPage, bool) {
+		rendered := map[string]*RenderedPage{}
+		if len(layers) == 0 {
+			return rendered, true
+		}
+		dir := filepath.Join(outDir, group)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, false
+		}
+		names := map[string]bool{}
+		for _, l := range layers {
+			name := b.Name + "-" + strings.ReplaceAll(b.layerName(l), ".", "_") + ".svg"
+			if names[name] {
+				return nil, false
+			}
+			names[name] = true
+		}
+		args := []string{"pcb", "export", "svg", "--mode-multi", "--exclude-drawing-sheet", "-l", strings.Join(layers, ","), "-o", dir}
+		if common != "" && b.has(common) {
+			args = append(args, "--common-layers", common)
+		}
+		if opt.Theme != "" {
+			args = append(args, "--theme", opt.Theme)
+		}
+		args = append(args, file)
+		cliSlots <- struct{}{}
+		_, err := exec.Command(opt.KicadCLI, args...).CombinedOutput()
+		<-cliSlots
+		if err != nil {
+			return nil, false
+		}
+		for _, l := range layers {
+			name := b.Name + "-" + strings.ReplaceAll(b.layerName(l), ".", "_") + ".svg"
+			rp, err := readSVG(filepath.Join(dir, name))
+			if err != nil {
+				return nil, false
+			}
+			rendered[l] = rp
+		}
+		return rendered, true
+	}
+	overview, ok := export(stackLayers, "", "overview")
+	if !ok {
+		return nil, false
+	}
+	detail, ok := export(detailLayers, "Edge.Cuts", "detail")
+	if !ok {
+		return nil, false
+	}
+	rendered := map[string]*RenderedPage{}
+	for _, pg := range pages {
+		if pg.Layer != "" && !b.has(pg.Layer) {
+			continue
+		}
+		if !pg.Stack {
+			rendered[pg.ID] = detail[pg.Layer]
+			continue
+		}
+		stack := &RenderedPage{}
+		for _, l := range pg.Layers {
+			if rp := overview[l]; rp != nil {
+				stack.Layers = append(stack.Layers, &LayerSVG{Layer: l, SVG: rp.SVG})
+				stack.Width, stack.Height = rp.Width, rp.Height
+			}
+		}
+		rendered[pg.ID] = stack
+	}
+	return rendered, true
 }
 
 // Match KiCad's hierarchy filenames, including its separator sanitization.

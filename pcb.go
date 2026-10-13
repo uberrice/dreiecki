@@ -694,12 +694,15 @@ func planPages(a, b *Board) []pcbPage {
 }
 
 func buildPCBReport(ba, bb *Board, pages []pcbPage, ra, rb map[string]*RenderedPage) *Report {
-	ca, cb := ba.Extract(), bb.Extract()
-	all := append(diffComponents(ca.Footprints, cb.Footprints), diffItems(ca.Items, cb.Items)...)
-	all = append(all, diffBoard(ba, bb)...)
-	sortChanges(all)
-
-	rep := &Report{Kind: "pcb"}
+	view := ba == bb
+	var all []Change
+	if !view {
+		ca, cb := ba.Extract(), bb.Extract()
+		all = append(diffComponents(ca.Footprints, cb.Footprints), diffItems(ca.Items, cb.Items)...)
+		all = append(all, diffBoard(ba, bb)...)
+		sortChanges(all)
+	}
+	rep := &Report{Kind: "pcb", View: view}
 	for i, pg := range pages {
 		page := PageReport{ID: fmt.Sprintf("p%d", i), Name: pg.Name, File: bb.Root, Changes: []Change{}}
 		for _, c := range all {
@@ -708,6 +711,9 @@ func buildPCBReport(ba, bb *Board, pages []pcbPage, ra, rb map[string]*RenderedP
 			}
 		}
 		svgA, svgB := ra[pg.ID], rb[pg.ID]
+		if view {
+			svgA = nil
+		}
 		for _, sp := range []*RenderedPage{svgA, svgB} {
 			if sp != nil {
 				page.Width, page.Height = sp.Width, sp.Height
@@ -726,6 +732,8 @@ func buildPCBReport(ba, bb *Board, pages []pcbPage, ra, rb map[string]*RenderedP
 		switch {
 		case svgA == nil && svgB == nil:
 			continue
+		case view:
+			page.Status = "same"
 		case svgA == nil:
 			page.Status = "added"
 		case svgB == nil:

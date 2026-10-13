@@ -176,12 +176,6 @@ func diffItems(a, b []*Item) []Change {
 			byUUID[it.UUID] = it
 		}
 	}
-	// Items without a matching uuid are matched by identical content, so
-	// re-created but identical objects don't show up as noise.
-	bByContent := map[string][]*Item{}
-	for _, it := range b {
-		bByContent[it.Kind+"|"+it.Content] = append(bByContent[it.Kind+"|"+it.Content], it)
-	}
 	matchedB := map[*Item]bool{}
 	var leftoverA []*Item
 	for _, ia := range a {
@@ -218,20 +212,21 @@ func diffItems(a, b []*Item) []Change {
 			BoxA: &boxA, BoxB: &boxB, layers: union(ia.Layers, ib.Layers),
 		})
 	}
+	// UUID matches take precedence. Queue only the remaining B objects, then
+	// consume each candidate once even when many objects have identical content.
+	bByContent := map[string][]*Item{}
+	for _, it := range b {
+		if !matchedB[it] {
+			key := it.Kind + "|" + it.Content
+			bByContent[key] = append(bByContent[key], it)
+		}
+	}
 	for _, ia := range leftoverA {
 		key := ia.Kind + "|" + ia.Content
-		if cands := bByContent[key]; len(cands) > 0 {
-			found := false
-			for _, ib := range cands {
-				if !matchedB[ib] {
-					matchedB[ib] = true
-					found = true
-					break
-				}
-			}
-			if found {
-				continue
-			}
+		if candidates := bByContent[key]; len(candidates) > 0 {
+			matchedB[candidates[0]] = true
+			bByContent[key] = candidates[1:]
+			continue
 		}
 		box := ia.Box
 		changes = append(changes, Change{

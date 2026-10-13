@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 )
 
 // Source provides read access to a project tree at a given revision.
@@ -44,6 +48,10 @@ type gitSource struct {
 	repo   string
 	commit string
 	info   RevInfo
+	mu     sync.Mutex
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *bufio.Reader
 }
 
 func newGitSource(repo, ref string) (*gitSource, error) {
@@ -62,8 +70,78 @@ func newGitSource(repo, ref string) (*gitSource, error) {
 	return &gitSource{repo: repo, commit: commit, info: info}, nil
 }
 
+// ReadFile keeps one cat-file process per revision rather than starting Git for
+// every sheet. Newline-containing paths use git show's unambiguous argument form.
 func (g *gitSource) ReadFile(rel string) ([]byte, error) {
-	return git(g.repo, "show", g.commit+":"+rel)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var data []byte
+	var err error
+	if strings.ContainsAny(rel, "\n\r") {
+		data, err = git(g.repo, "show", g.commit+":"+rel)
+	} else {
+		if g.cmd == nil {
+			cmd := exec.Command("git", "-C", g.repo, "cat-file", "--batch")
+			stdin, pipeErr := cmd.StdinPipe()
+			if pipeErr != nil {
+				return nil, pipeErr
+			}
+			stdout, pipeErr := cmd.StdoutPipe()
+			if pipeErr != nil {
+				stdin.Close()
+				return nil, pipeErr
+			}
+			if pipeErr = cmd.Start(); pipeErr != nil {
+				stdin.Close()
+				return nil, pipeErr
+			}
+			g.cmd, g.stdin, g.stdout = cmd, stdin, bufio.NewReader(stdout)
+		}
+		if _, err = io.WriteString(g.stdin, g.commit+":"+rel+"\n"); err != nil {
+			return nil, err
+		}
+		header, headerErr := g.stdout.ReadString('\n')
+		if headerErr != nil {
+			return nil, headerErr
+		}
+		fields := strings.Fields(header)
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("reading %s: %s", rel, strings.TrimSpace(header))
+		}
+		size, sizeErr := strconv.Atoi(fields[2])
+		if sizeErr != nil || size < 0 {
+			return nil, fmt.Errorf("invalid git blob size: %q", fields[2])
+		}
+		if fields[1] != "blob" {
+			if _, err = io.CopyN(io.Discard, g.stdout, int64(size)+1); err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("reading %s: expected blob, got %s", rel, fields[1])
+		}
+		data = make([]byte, size)
+		if _, err = io.ReadFull(g.stdout, data); err != nil {
+			return nil, err
+		}
+		if delimiter, readErr := g.stdout.ReadByte(); readErr != nil || delimiter != '\n' {
+			return nil, fmt.Errorf("invalid git blob delimiter: %v", readErr)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func (g *gitSource) Close() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.cmd == nil {
+		return nil
+	}
+	g.stdin.Close()
+	err := g.cmd.Wait()
+	g.cmd, g.stdin, g.stdout = nil, nil, nil
+	return err
 }
 
 func (g *gitSource) ListDir(rel string) ([]string, error) {
