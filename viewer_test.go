@@ -16,6 +16,11 @@ func TestViewerSVGURLLifetime(t *testing.T) {
 	if start < 0 || end <= start {
 		t.Fatal("SVG loading functions not found")
 	}
+	workerStart := strings.Index(viewerHTML, "const pixSrc = document.getElementById")
+	workerEnd := strings.Index(viewerHTML, "// One active worker job")
+	if workerStart < 0 || workerEnd <= workerStart {
+		t.Fatal("worker bootstrap not found")
+	}
 	script := `const assert = require("node:assert/strict");
 const zlib = require("node:zlib");
 const active = new Set();
@@ -29,6 +34,10 @@ global.Image = class {
   assert.equal(await (await fetch(this.src)).text(), "<svg/>");
  }
 };
+global.document = { getElementById: () => ({ textContent: "" }) };
+global.Worker = class { constructor(url) { this.url = url; } terminate() {} };
+` + viewerHTML[workerStart:workerEnd] + `
+assert.equal(active.size, 0, "the worker blob URL was not revoked");
 ` + viewerHTML[start:end] + `
 (async () => {
  const packed = zlib.gzipSync("<svg/>").toString("base64");
