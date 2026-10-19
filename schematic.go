@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Project is one revision of a (possibly hierarchical) schematic.
@@ -18,6 +19,9 @@ type Project struct {
 	Files  map[string][]byte // every file needed to render, repo-relative
 	Parsed map[string]*Node  // parsed schematic files
 	Sheets []*SheetInst      // sheet instances in page order
+
+	libGeom   map[string]map[string]string // library symbol geometry, per file
+	libGeomMu sync.Mutex                   // guards libGeom
 }
 
 // SheetInst is one page of the hierarchy. A sheet file used twice yields two instances.
