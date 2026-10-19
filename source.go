@@ -55,11 +55,10 @@ type gitSource struct {
 }
 
 func newGitSource(repo, ref string) (*gitSource, error) {
-	out, err := git(repo, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	commit, err := resolveCommit(repo, ref)
 	if err != nil {
-		return nil, fmt.Errorf("unknown git revision %q", ref)
+		return nil, err
 	}
-	commit := strings.TrimSpace(string(out))
 	info := RevInfo{Label: ref, Commit: commit}
 	if out, err := git(repo, "log", "-1", "--format=%s%x00%an%x00%ad", "--date=short", commit); err == nil {
 		parts := strings.SplitN(strings.TrimRight(string(out), "\n"), "\x00", 3)
@@ -70,15 +69,37 @@ func newGitSource(repo, ref string) (*gitSource, error) {
 	return &gitSource{repo: repo, commit: commit, info: info}, nil
 }
 
+// resolveCommit resolves a revision to a commit SHA. --end-of-options keeps
+// git from reading the revision as an option.
+func resolveCommit(repo, ref string) (string, error) {
+	spec := ref
+	if !strings.Contains(spec, "^{") {
+		spec += "^{commit}"
+	}
+	out, err := git(repo, "rev-parse", "--verify", "--end-of-options", spec)
+	if err != nil {
+		return "", fmt.Errorf("unknown git revision %q: %w", ref, err)
+	}
+	commit := strings.TrimSpace(string(out))
+	kind, err := git(repo, "cat-file", "-t", commit)
+	if err != nil {
+		return "", fmt.Errorf("unknown git revision %q: %w", ref, err)
+	}
+	if k := strings.TrimSpace(string(kind)); k != "commit" {
+		return "", fmt.Errorf("unknown git revision %q: %s is a %s, not a commit", ref, commit, k)
+	}
+	return commit, nil
+}
+
 // ReadFile keeps one cat-file process per revision rather than starting Git for
-// every sheet. Newline-containing paths use git show's unambiguous argument form.
+// every sheet. Newline-containing paths use cat-file's argument form instead.
 func (g *gitSource) ReadFile(rel string) ([]byte, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	var data []byte
 	var err error
 	if strings.ContainsAny(rel, "\n\r") {
-		data, err = git(g.repo, "show", g.commit+":"+rel)
+		data, err = git(g.repo, "cat-file", "blob", g.commit+":"+rel)
 	} else {
 		if g.cmd == nil {
 			cmd := exec.Command("git", "-C", g.repo, "cat-file", "--batch")
@@ -191,6 +212,9 @@ func (w *workSource) Info() RevInfo {
 
 // cleanRel normalizes a repo-relative path and rejects paths escaping the repo.
 func cleanRel(p string) (string, error) {
+	if strings.ContainsRune(p, 0) {
+		return "", fmt.Errorf("path %q contains a NUL byte", p)
+	}
 	c := path.Clean(p)
 	if c == ".." || strings.HasPrefix(c, "../") || path.IsAbs(c) {
 		return "", fmt.Errorf("path %q is outside the repository", p)
@@ -212,6 +236,10 @@ func (w *workSource) ListFiles() ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(w.root, func(p string, e fs.DirEntry, err error) error {
 		if err != nil {
+			if e != nil && e.IsDir() {
+				// An unreadable directory must not abort the whole walk.
+				return filepath.SkipDir
+			}
 			return err
 		}
 		if e.IsDir() {
