@@ -82,3 +82,7 @@ boards, dreiecki reads the `.kicad_pcb` and project files the same way and plots
 ```
 
 [docs/develop.md](docs/develop.md) covers building from source and cutting releases.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE) for the full text.
