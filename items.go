@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"math"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Box is an axis-aligned rectangle in schematic millimetres.
@@ -58,7 +60,7 @@ type Item struct {
 	// Optional overrides, set for PCB items.
 	Category string
 	Title    string
-	Desc     string            // position description for added/removed items
+	Desc     string            // e.g. wire endpoints; subtitle of added/removed items
 	Attrs    map[string]string // named properties reported individually when they change
 	Layers   []string
 }
@@ -91,15 +93,32 @@ var itemKinds = map[string]bool{
 	"rule_area": true,
 }
 
-// Extract collects the objects of sheet inst in project p.
-func Extract(p *Project, inst *SheetInst) *SheetContent {
-	sch := p.Parsed[inst.File]
-	libDefs := map[string]string{}
+// libGeometry returns the library symbol geometry of a schematic file, cached
+// per file. The returned map is shared and must not be modified.
+func (p *Project) libGeometry(file string, sch *Node) map[string]string {
+	p.libGeomMu.Lock()
+	defer p.libGeomMu.Unlock()
+	if defs, ok := p.libGeom[file]; ok {
+		return defs
+	}
+	defs := map[string]string{}
 	if ls := sch.Child("lib_symbols"); ls != nil {
 		for _, s := range ls.Children("symbol") {
-			libDefs[s.Arg(0)] = symbolGeometry(s)
+			defs[s.Arg(0)] = symbolGeometry(s)
 		}
 	}
+	if p.libGeom == nil {
+		p.libGeom = map[string]map[string]string{}
+	}
+	p.libGeom[file] = defs
+	return defs
+}
+
+// Extract collects the objects of sheet inst in project p. It is safe for
+// concurrent use on the same project.
+func Extract(p *Project, inst *SheetInst) *SheetContent {
+	sch := p.Parsed[inst.File]
+	libDefs := p.libGeometry(inst.File, sch)
 	sc := &SheetContent{}
 	for _, n := range sch.List {
 		if !n.IsList {
@@ -206,7 +225,20 @@ func extractItem(n *Node) *Item {
 		it.Text = propValue(n, "Sheetname")
 	}
 	it.Box = itemBox(n)
+	if it.Kind == "wire" || it.Kind == "bus" {
+		it.Desc = wireDesc(n)
+	}
 	return it
+}
+
+// wireDesc describes a wire or bus by its first and last point.
+func wireDesc(n *Node) string {
+	xy := n.Child("pts").Children("xy")
+	if len(xy) < 2 {
+		return ""
+	}
+	pos := func(p *Node) string { return fmtPos(num(p.Arg(0)), num(p.Arg(1))) }
+	return fmt.Sprintf("%s–%s", pos(xy[0]), pos(xy[len(xy)-1]))
 }
 
 // itemBox estimates a bounding box from whatever coordinates the object carries.
@@ -245,15 +277,19 @@ func itemBox(n *Node) Box {
 	if n.Head() != "wire" && n.Head() != "bus" {
 		pad := 1.5
 		if len(n.Arg(0)) > 0 {
-			pad = math.Max(pad, float64(len(n.Arg(0)))*0.7)
+			pad = math.Max(pad, float64(utf8.RuneCountInString(n.Arg(0)))*0.7)
 		}
 		b = Box{b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad}
 	}
 	return b
 }
 
+// num parses a coordinate; unparseable and non-finite values become 0.
 func num(s string) float64 {
-	f, _ := strconv.ParseFloat(s, 64)
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0
+	}
 	return f
 }
 
@@ -262,12 +298,7 @@ func fmtNum(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
 func fmtPos(x, y float64) string { return fmt.Sprintf("(%s, %s)", fmtNum(x), fmtNum(y)) }
 
 func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return slices.Sorted(maps.Keys(m))
 }
 
 // symbolGeometry excludes library metadata and field defaults from the definition.

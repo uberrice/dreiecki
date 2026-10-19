@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"maps"
+	"math"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -23,42 +26,48 @@ const symbolRadius = 6.0
 
 func diffComponents(a, b []*Component) []Change {
 	var changes []Change
-	byUUID := map[string]*Component{}
+	byUUID := map[string][]*Component{}
 	for _, c := range b {
 		if c.UUID != "" {
-			byUUID[c.UUID] = c
+			byUUID[c.UUID] = append(byUUID[c.UUID], c)
 		}
 	}
 	matchedB := map[*Component]bool{}
 	var unmatchedA []*Component
 	pairs := [][2]*Component{}
 	for _, ca := range a {
-		if cb, ok := byUUID[ca.UUID]; ok && !matchedB[cb] {
-			matchedB[cb] = true
-			pairs = append(pairs, [2]*Component{ca, cb})
+		// A repeated identifier is ambiguous and must not be paired by uuid.
+		cands := byUUID[ca.UUID]
+		if len(cands) == 1 && !matchedB[cands[0]] {
+			matchedB[cands[0]] = true
+			pairs = append(pairs, [2]*Component{ca, cands[0]})
 		} else {
 			unmatchedA = append(unmatchedA, ca)
 		}
 	}
 	// Fall back to reference designator + unit (e.g. part deleted and re-placed).
-	byRef := map[string]*Component{}
+	var unmatchedB []*Component
 	for _, cb := range b {
 		if !matchedB[cb] {
-			byRef[cb.Ref+"/"+cb.Unit] = cb
+			unmatchedB = append(unmatchedB, cb)
 		}
 	}
-	var removed []*Component
-	for _, ca := range unmatchedA {
-		if cb, ok := byRef[ca.Ref+"/"+ca.Unit]; ok && !matchedB[cb] && !strings.HasSuffix(ca.Ref, "?") {
-			matchedB[cb] = true
-			pairs = append(pairs, [2]*Component{ca, cb})
-		} else {
-			removed = append(removed, ca)
-		}
+	refPairs := matchByRef(unmatchedA, unmatchedB)
+	matchedA := map[*Component]bool{}
+	for _, p := range refPairs {
+		matchedA[p[0]] = true
+		matchedB[p[1]] = true
+		pairs = append(pairs, p)
 	}
 	for _, p := range pairs {
 		if ch, ok := compareComponent(p[0], p[1]); ok {
 			changes = append(changes, ch)
+		}
+	}
+	var removed []*Component
+	for _, ca := range unmatchedA {
+		if !matchedA[ca] {
+			removed = append(removed, ca)
 		}
 	}
 	for _, ca := range removed {
@@ -76,6 +85,85 @@ func diffComponents(a, b []*Component) []Change {
 		}
 	}
 	return changes
+}
+
+// matchByRef pairs components by reference designator and unit. An ambiguous
+// reference pairs unchanged parts first, then parts with a unique library id,
+// so the file order never decides which change is reported.
+func matchByRef(a, b []*Component) [][2]*Component {
+	groupA := map[string][]*Component{}
+	groupB := map[string][]*Component{}
+	for _, c := range a {
+		if strings.HasSuffix(c.Ref, "?") {
+			continue
+		}
+		groupA[refKey(c)] = append(groupA[refKey(c)], c)
+	}
+	for _, c := range b {
+		groupB[refKey(c)] = append(groupB[refKey(c)], c)
+	}
+	var pairs [][2]*Component
+	for _, key := range slices.Sorted(maps.Keys(groupA)) {
+		ga, gb := groupA[key], groupB[key]
+		if len(ga) == 1 && len(gb) == 1 {
+			pairs = append(pairs, [2]*Component{ga[0], gb[0]})
+			continue
+		}
+		unchanged, restA, restB := pairUnchanged(ga, gb)
+		pairs = append(pairs, unchanged...)
+		for _, ca := range restA {
+			cands := withLibID(restB, ca.LibID)
+			if len(cands) != 1 || len(withLibID(restA, ca.LibID)) != 1 {
+				continue
+			}
+			pairs = append(pairs, [2]*Component{ca, cands[0]})
+		}
+	}
+	return pairs
+}
+
+// pairUnchanged pairs identical components and returns the leftovers.
+func pairUnchanged(ga, gb []*Component) (pairs [][2]*Component, restA, restB []*Component) {
+	usedB := map[*Component]bool{}
+	for _, ca := range ga {
+		var partner *Component
+		for _, cb := range gb {
+			if !usedB[cb] && sameComponent(ca, cb) {
+				partner = cb
+				break
+			}
+		}
+		if partner == nil {
+			restA = append(restA, ca)
+			continue
+		}
+		usedB[partner] = true
+		pairs = append(pairs, [2]*Component{ca, partner})
+	}
+	for _, cb := range gb {
+		if !usedB[cb] {
+			restB = append(restB, cb)
+		}
+	}
+	return pairs, restA, restB
+}
+
+func sameComponent(a, b *Component) bool {
+	return a.LibID == b.LibID && maps.Equal(a.Props, b.Props) &&
+		maps.Equal(a.Flags, b.Flags) && a.Mirror == b.Mirror &&
+		samePos(a.X, b.X) && samePos(a.Y, b.Y) && sameAngle(a.Rot, b.Rot)
+}
+
+func refKey(c *Component) string { return c.Ref + "/" + c.Unit }
+
+func withLibID(cs []*Component, libID string) []*Component {
+	var out []*Component
+	for _, c := range cs {
+		if c.LibID == libID {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func compareComponent(a, b *Component) (Change, bool) {
@@ -139,11 +227,11 @@ func compareComponent(a, b *Component) (Change, bool) {
 		}
 	}
 	semantic := len(details) > 0
-	if a.X != b.X || a.Y != b.Y {
+	if !samePos(a.X, b.X) || !samePos(a.Y, b.Y) {
 		moved = true
 		details = append(details, fmt.Sprintf("Moved %s → %s", fmtPos(a.X, a.Y), fmtPos(b.X, b.Y)))
 	}
-	if a.Rot != b.Rot {
+	if !sameAngle(a.Rot, b.Rot) {
 		moved = true
 		details = append(details, fmt.Sprintf("Rotation: %s° → %s°", fmtNum(a.Rot), fmtNum(b.Rot)))
 	}
@@ -170,20 +258,22 @@ func compareComponent(a, b *Component) (Change, bool) {
 
 func diffItems(a, b []*Item) []Change {
 	var changes []Change
-	byUUID := map[string]*Item{}
+	byUUID := map[string][]*Item{}
 	for _, it := range b {
 		if it.UUID != "" {
-			byUUID[it.UUID] = it
+			byUUID[it.UUID] = append(byUUID[it.UUID], it)
 		}
 	}
 	matchedB := map[*Item]bool{}
 	var leftoverA []*Item
 	for _, ia := range a {
-		ib, ok := byUUID[ia.UUID]
-		if !ok || ia.UUID == "" || ib.Kind != ia.Kind {
+		// A repeated identifier is ambiguous and must not be paired by uuid.
+		cands := byUUID[ia.UUID]
+		if len(cands) != 1 || cands[0].Kind != ia.Kind || matchedB[cands[0]] {
 			leftoverA = append(leftoverA, ia)
 			continue
 		}
+		ib := cands[0]
 		matchedB[ib] = true
 		if ia.Content == ib.Content {
 			continue
@@ -258,7 +348,24 @@ func describeGeom(it *Item) string {
 	return fmt.Sprintf("near %s", fmtPos(round1((b[0]+b[2])/2), round1((b[1]+b[3])/2)))
 }
 
-func round1(f float64) float64 { return float64(int64(f*10+0.5*sign(f))) / 10 }
+// posEpsilon is the tolerance for positions (mm) and rotations (degrees).
+const posEpsilon = 1e-6
+
+func samePos(a, b float64) bool { return math.Abs(a-b) <= posEpsilon }
+
+// sameAngle compares two angles in degrees, modulo 360.
+func sameAngle(a, b float64) bool {
+	d := math.Mod(math.Mod(a-b, 360)+540, 360) - 180
+	return math.Abs(d) <= posEpsilon
+}
+
+// round1 rounds to one decimal; values too large for int64 are returned as is.
+func round1(f float64) float64 {
+	if math.Abs(f) > 1e15 {
+		return f
+	}
+	return float64(int64(f*10+0.5*sign(f))) / 10
+}
 
 func sign(f float64) float64 {
 	if f < 0 {
