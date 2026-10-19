@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Board is one revision of a .kicad_pcb.
@@ -287,6 +288,11 @@ func (b *Board) footprint(n *Node) *Component {
 	var fieldPos, geom []string
 	layers := []string{layer}
 	pts := &bounds{}
+	type unnamedPad struct {
+		geom, net string
+		at        int // position in PadOrder
+	}
+	var unnamed []unnamedPad
 	for _, ch := range n.List[1:] {
 		if !ch.IsList {
 			continue
@@ -319,20 +325,6 @@ func (b *Board) footprint(n *Node) *Component {
 		}
 		layers = append(layers, b.nodeLayers(ch)...)
 		pts.addLocal(ch)
-		if h == "pad" {
-			k := ch.Arg(0)
-			for i := 2; ; i++ {
-				if _, dup := c.Pads[k]; !dup {
-					break
-				}
-				k = fmt.Sprintf("%s#%d", ch.Arg(0), i)
-			}
-			c.Pads[k] = ""
-			if nt := ch.Child("net"); nt != nil {
-				c.Pads[k] = b.netName(nt)
-			}
-			c.PadOrder = append(c.PadOrder, k)
-		}
 		var sb strings.Builder
 		geometry := relAngle(ch, c.Rot)
 		if h == "pad" {
@@ -340,6 +332,41 @@ func (b *Board) footprint(n *Node) *Component {
 		}
 		b.write(&sb, geometry, h == "pad")
 		geom = append(geom, sb.String())
+		if h == "pad" {
+			net := ""
+			if nt := ch.Child("net"); nt != nil {
+				net = b.netName(nt)
+			}
+			if name := ch.Arg(0); name != "" {
+				k := name
+				for i := 2; ; i++ {
+					if _, dup := c.Pads[k]; !dup {
+						break
+					}
+					k = fmt.Sprintf("%s#%d", name, i)
+				}
+				c.Pads[k] = net
+				c.PadOrder = append(c.PadOrder, k)
+			} else {
+				unnamed = append(unnamed, unnamedPad{geom: sb.String(), net: net, at: len(c.PadOrder)})
+				c.PadOrder = append(c.PadOrder, "")
+			}
+		}
+	}
+	// Key unnamed pads by geometry, so reordering them is not a net change.
+	sort.SliceStable(unnamed, func(i, j int) bool {
+		if unnamed[i].geom != unnamed[j].geom {
+			return unnamed[i].geom < unnamed[j].geom
+		}
+		return unnamed[i].net < unnamed[j].net
+	})
+	for i, p := range unnamed {
+		k := "(unnamed)"
+		if i > 0 {
+			k = fmt.Sprintf("(unnamed %d)", i+1)
+		}
+		c.Pads[k] = p.net
+		c.PadOrder[p.at] = k
 	}
 	c.FieldPos = strings.Join(fieldPos, ";")
 	c.LibDef = strings.Join(geom, " ")
@@ -551,7 +578,7 @@ func (b *Board) item(n *Node) *Item {
 		pad = math.Max(pad, num(s.Arg(0))/2)
 	}
 	if it.Category == "text" {
-		pad = math.Max(1.5, float64(len(it.Text))*0.5)
+		pad = math.Max(1.5, float64(utf8.RuneCountInString(it.Text))*0.5)
 	}
 	it.Box, _ = p.box(0, 0, 0, pad)
 	switch it.Kind {
