@@ -47,8 +47,13 @@ func TestPackSVGWriterReuse(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for _, input := range []string{"<svg><title>volatile</title>first</svg>", "<svg>second</svg>"} {
-				packed, err := base64.StdEncoding.DecodeString(packSVG([]byte(input)))
+			// The expected result is spelled out: packSVG must drop the volatile title, and the
+			// expectation must not be computed with the function under test.
+			for _, tc := range []struct{ in, want string }{
+				{"<svg><title>volatile</title>first</svg>", "<svg>first</svg>"},
+				{"<svg>second</svg>", "<svg>second</svg>"},
+			} {
+				packed, err := base64.StdEncoding.DecodeString(packSVG([]byte(tc.in)))
 				if err != nil {
 					t.Error(err)
 					return
@@ -60,8 +65,8 @@ func TestPackSVGWriterReuse(t *testing.T) {
 				}
 				got, err := io.ReadAll(reader)
 				reader.Close()
-				if err != nil || !bytes.Equal(got, stripVolatile([]byte(input))) {
-					t.Errorf("unexpected packed SVG: %q, %v", got, err)
+				if err != nil || !bytes.Equal(got, []byte(tc.want)) {
+					t.Errorf("unexpected packed SVG: %q, %v; want %q", got, err, tc.want)
 				}
 			}
 		}()
@@ -118,10 +123,7 @@ func TestDiffItemsFallbackPreservesUUIDPriorityAndMultiplicity(t *testing.T) {
 }
 
 func TestRenderPCBBatchWithKiCad(t *testing.T) {
-	cli, err := exec.LookPath("kicad-cli")
-	if err != nil {
-		t.Skip("kicad-cli not installed")
-	}
+	cli := kicadCLI(t)
 	help, err := exec.Command(cli, "pcb", "export", "svg", "--help").Output()
 	if err != nil || !bytes.Contains(help, []byte("--mode-multi")) {
 		t.Skip("KiCad does not support multi-file plotting")

@@ -29,6 +29,20 @@ done
 	return file
 }
 
+// kicadCLI returns the path of kicad-cli. Without KiCad the test is skipped, unless the CI job
+// that installs KiCad asks for it: there a missing KiCad has to fail the build, not skip the test.
+func kicadCLI(t *testing.T) string {
+	t.Helper()
+	cli, err := exec.LookPath("kicad-cli")
+	if err != nil {
+		if os.Getenv("DREIECKI_REQUIRE_KICAD") != "" {
+			t.Fatalf("kicad-cli is not installed: %v", err)
+		}
+		t.Skip("kicad-cli is not installed")
+	}
+	return cli
+}
+
 func TestRenderMatchesFilenamesWithoutEnglishOutput(t *testing.T) {
 	cli := fakeCLI(t, `printf '%s' '<svg viewBox="0 0 297 210">root</svg>' > "$out/test.svg"
 printf '%s' '<svg viewBox="0 0 297 210">second</svg>' > "$out/test-B.svg"
@@ -107,10 +121,7 @@ func TestRenderPCBStackAfterSinglePages(t *testing.T) {
 
 // This smoke test also checks KiCad's actual filename sanitization when installed.
 func TestRenderWithKiCad(t *testing.T) {
-	cli, err := exec.LookPath("kicad-cli")
-	if err != nil {
-		t.Skip("kicad-cli is not installed")
-	}
+	cli := kicadCLI(t)
 	const rootUUID = "00000000-0000-0000-0000-000000000001"
 	const sheetUUID = "00000000-0000-0000-0000-000000000002"
 	src := memSource{
