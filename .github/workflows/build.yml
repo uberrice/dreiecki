@@ -33,6 +33,11 @@ jobs:
           else
             v="dev-${GITHUB_SHA::7}"
           fi
+          # The version reaches file names, -ldflags and the release title.
+          if [ "$GITHUB_REF_TYPE" = tag ] && ! [[ "$v" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?([+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::invalid version tag: $v"
+            exit 1
+          fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Version: $v"
 
@@ -43,10 +48,47 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: gofmt
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
-      - run: go test ./...
+      - name: go test
+        run: |
+          node --version # the viewer tests skip without Node
+          go test -race ./...
+
+  # Runs the KiCad-gated tests. The release doesn't wait for it, as it uses a third-party PPA.
+  kicad:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install KiCad
+        run: |
+          # Ubuntu ships KiCad 7, which cannot plot several files at once.
+          sudo add-apt-repository -y ppa:kicad/kicad-9.0-releases
+          sudo apt-get update
+          sudo apt-get install -y kicad
+          command -v kicad-cli
+      - name: Assert that KiCad can plot several files at once
+        run: |
+          # Otherwise the batch test would pass without testing anything.
+          help=$(kicad-cli pcb export svg --help)
+          echo "$help"
+          for option in --mode-multi --common-layers; do
+            case "$help" in
+              *"$option"*) ;;
+              *) echo "::error::kicad-cli has no $option; install KiCad 9 or newer"; exit 1 ;;
+            esac
+          done
+      - name: go test with KiCad
+        env:
+          DREIECKI_REQUIRE_KICAD: "1"
+        run: go test -run 'TestRenderWithKiCad|TestRenderPCBBatchWithKiCad' ./...
 
   build:
     needs: version
@@ -78,6 +120,7 @@ jobs:
           mkdir -p "dist/$name"
           go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "dist/$name/$bin" .
           cp README.md "dist/$name/"
+          cp -R docs "dist/$name/"
           cd dist
           if [ "$GOOS" = windows ]; then
             zip -qr "$name.zip" "$name"

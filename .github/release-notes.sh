@@ -16,7 +16,8 @@ range=$sha
 [ -n "$prev" ] && range="$prev..$sha"
 commits=""
 while read -r c subject; do
-  prs=$(gh api "repos/$repo/commits/$c/pulls" --jq '[.[] | select(.merged_at != null)] | length')
+  # A failed lookup must not abort the release; the commit is then listed here.
+  prs=$(gh api "repos/$repo/commits/$c/pulls" --jq '[.[] | select(.merged_at != null)] | length' 2>/dev/null || echo 0)
   [ "$prs" = 0 ] && commits+="* $subject (${c:0:7})"$'\n'
 done < <(git log --no-merges --format='%H %s' "$range")
 
@@ -27,3 +28,6 @@ main=$(grep -v '^\*\*Full Changelog\*\*' <<<"$body" | sed -e :a -e '/^\n*$/{$d;N
 [ -n "$main" ] && printf '%s\n\n' "$main"
 [ -n "$commits" ] && printf '## Other changes\n%s\n' "$commits"
 [ -n "$changelog" ] && printf '%s\n' "$changelog"
+
+# Don't let the last test's status (no "Full Changelog" line) fail the release.
+exit 0
