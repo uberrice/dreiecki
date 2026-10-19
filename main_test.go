@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -270,5 +274,83 @@ func TestBuildReportIgnoresTheVolatileTitle(t *testing.T) {
 		if len(p.Changes) != 0 {
 			t.Errorf("page %s: %+v", p.Name, p.Changes)
 		}
+	}
+}
+
+// The renderer loads and renders the two revisions in parallel, so the race detector has to
+// see that path.
+func TestCompareSchematicRendersBothRevisions(t *testing.T) {
+	cli := fakeCLI(t, `printf '%s' '<svg viewBox="0 0 297 210">root</svg>' > "$out/test.svg"`)
+	schematic := func(value string) memSource {
+		return memSource{
+			"test.kicad_pro": "{}",
+			"test.kicad_sch": `(kicad_sch (uuid root) (sheet_instances (path "/" (page "1")))
+			  (symbol (lib_id "Device:R") (uuid part) (unit 1) (at 10 20 0)
+			    (property "Reference" "R1") (property "Value" "` + value + `")))`,
+		}
+	}
+	// The two sides are different sources: a map cannot be compared, and the renderer checks
+	// whether both sides are the same one.
+	srcA := schematic("10k")
+	srcB := schematic("22k")
+	rep, err := compareSchematic(srcA, &srcB, "test.kicad_sch", t.TempDir(), RenderOptions{KicadCLI: cli})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Pages) != 1 {
+		t.Fatalf("pages: %+v", rep.Pages)
+	}
+	page := rep.Pages[0]
+	if len(page.Changes) != 1 || page.Changes[0].Op != "changed" {
+		t.Fatalf("changes: %+v", page.Changes)
+	}
+	if got := strings.Join(page.Changes[0].Details, ";"); got != "Value: 10k → 22k" {
+		t.Fatalf("details: %q", got)
+	}
+	if page.SvgA == "" || page.SvgB == "" {
+		t.Fatalf("both revisions must be rendered: %+v", page)
+	}
+}
+
+// A view of the working tree compares nothing, so the report must not claim that there are
+// uncommitted changes.
+func TestViewModeHasNoUncommittedSubject(t *testing.T) {
+	cli := fakeCLI(t, `printf '%s' '<svg viewBox="0 0 297 210">root</svg>' > "$out/test.svg"`)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "test.kicad_pro"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "test.kicad_sch"),
+		[]byte(`(kicad_sch (uuid root) (sheet_instances (path "/" (page "1"))))`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// The report is written inside a repository, so that the revision is found.
+	if _, err := git(dir, "init", "-q"); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	out := filepath.Join(t.TempDir(), "report.html")
+	if err := run("", "", filepath.Join(dir, "test.kicad_pro"), out, false, false, false,
+		RenderOptions{KicadCLI: cli}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const marker = "const DATA = "
+	i := bytes.Index(data, []byte(marker))
+	if i < 0 {
+		t.Fatalf("the report carries no data: %s", data)
+	}
+	var rep Report
+	if err := json.NewDecoder(bytes.NewReader(data[i+len(marker):])).Decode(&rep); err != nil {
+		t.Fatal(err)
+	}
+	if !rep.View {
+		t.Fatalf("the report is not a view: %+v", rep)
+	}
+	if rep.B.Subject != "" {
+		t.Fatalf("the subject of the view is %q; want it empty", rep.B.Subject)
 	}
 }
