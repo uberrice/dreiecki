@@ -108,6 +108,9 @@ func parseRefs(args []string) (string, string, error) {
 	case 0:
 		return "", "", nil
 	case 1:
+		if args[0] == "" {
+			return "", "", fmt.Errorf("empty revision: expected a commit, branch or tag")
+		}
 		if strings.Contains(args[0], "...") {
 			return "", "", fmt.Errorf("use A..B, not A...B")
 		}
@@ -122,12 +125,24 @@ func parseRefs(args []string) (string, string, error) {
 		}
 		return args[0], worktreeRef, nil
 	case 2:
+		if args[0] == "" || args[1] == "" {
+			return "", "", fmt.Errorf("empty revision: expected a commit, branch or tag")
+		}
 		return args[0], args[1], nil
 	}
 	return "", "", fmt.Errorf("expected at most two revisions")
 }
 
 func run(refA, refB, rootPath, outPath string, pcb, open, keepTmp bool, opt RenderOptions) error {
+	view := refA == "" // the working tree on its own, no comparison
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("cannot determine the current directory: %w", err)
+	}
+	// Fail before spending time on rendering.
+	if err := checkOutputPath(outPath); err != nil {
+		return err
+	}
 	if opt.KicadCLI == "" {
 		p, err := findKicadCLI()
 		if err != nil {
@@ -135,8 +150,6 @@ func run(refA, refB, rootPath, outPath string, pcb, open, keepTmp bool, opt Rend
 		}
 		opt.KicadCLI = p
 	}
-	view := refA == "" // the working tree on its own, no comparison
-	cwd, _ := os.Getwd()
 	repo := cwd
 	if top, err := git(cwd, "rev-parse", "--show-toplevel"); err == nil {
 		repo = strings.TrimSpace(string(top))
@@ -149,7 +162,6 @@ func run(refA, refB, rootPath, outPath string, pcb, open, keepTmp bool, opt Rend
 		srcA = &workSource{root: repo}
 		srcB = srcA
 	} else {
-		var err error
 		if srcA, err = makeSource(repo, refA); err != nil {
 			return err
 		}
@@ -576,7 +588,7 @@ func writeReport(rep *Report, out string) error {
 	}
 	file, err := os.CreateTemp(filepath.Dir(out), ".dreiecki-report-*")
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot create a report file in %s: %w", filepath.Dir(out), err)
 	}
 	defer os.Remove(file.Name())
 	defer file.Close()
@@ -611,20 +623,61 @@ func slug(r RevInfo) string {
 	}
 	s := strings.Trim(slugRe.ReplaceAllString(r.Label, "_"), "_")
 	if s == "" || len(s) > 40 {
-		s = r.Commit[:8]
+		s = r.Commit[:min(8, len(r.Commit))]
 	}
 	return s
 }
 
+// openBrowser opens p in the default browser; failures are only a warning.
 func openBrowser(p string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", p)
-	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", "", p)
-	default:
-		cmd = exec.Command("xdg-open", p)
+	if err := openCmd(browserCmd(runtime.GOOS, p), p); err != nil {
+		fmt.Fprintln(os.Stderr, "warning:", err)
 	}
-	_ = cmd.Start()
+}
+
+func browserCmd(goos, p string) *exec.Cmd {
+	switch goos {
+	case "darwin":
+		return exec.Command("open", p)
+	case "windows":
+		// Not "cmd /c start": cmd.exe would interpret & or % in the path.
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", p)
+	default:
+		return exec.Command("xdg-open", p)
+	}
+}
+
+// openCmd starts cmd and reaps it in the background. Its exit status says
+// nothing about the browser, so only a failure to start is an error.
+func openCmd(cmd *exec.Cmd, p string) error {
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("could not open %s: %w", p, err)
+	}
+	go cmd.Wait() // reap the launcher
+	return nil
+}
+
+// checkOutputPath checks that out is not a directory and its directory exists.
+func checkOutputPath(out string) error {
+	if out != "" {
+		if fi, err := os.Stat(out); err == nil && fi.IsDir() {
+			return fmt.Errorf("output path %s is a directory", out)
+		}
+	}
+	dir := filepath.Dir(out)
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("output directory %s does not exist; create it first", dir)
+		}
+		return fmt.Errorf("output directory %s: %w", dir, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("output directory %s is not a directory", dir)
+	}
+	return nil
 }
