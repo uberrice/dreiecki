@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -99,5 +100,122 @@ func TestGitSourceBatchReadsAndRecovery(t *testing.T) {
 	}
 	if err := src.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWorkSourceReadsTheWorkingTree(t *testing.T) {
+	repo := t.TempDir()
+	files := map[string]string{"a.txt": "hello", "sub/b.txt": "nested"}
+	for name, data := range files {
+		file := filepath.Join(repo, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte(data), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := &workSource{root: repo}
+	for name, want := range files {
+		got, err := w.ReadFile(name)
+		if err != nil || string(got) != want {
+			t.Errorf("read %q: %q, %v; want %q", name, got, err, want)
+		}
+	}
+	if _, err := w.ReadFile("missing.txt"); err == nil {
+		t.Error("a missing file must fail")
+	}
+	for _, tc := range []struct {
+		dir  string
+		want string
+	}{
+		{"", "a.txt,sub"},
+		{"sub", "b.txt"},
+	} {
+		names, err := w.ListDir(tc.dir)
+		if err != nil {
+			t.Fatalf("list %q: %v", tc.dir, err)
+		}
+		if got := strings.Join(names, ","); got != tc.want {
+			t.Errorf("list %q: %q; want %q", tc.dir, got, tc.want)
+		}
+	}
+	if _, err := w.ListDir("missing"); err == nil {
+		t.Error("a missing directory must fail")
+	}
+	list, err := w.ListFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(list, ","); got != "a.txt,sub/b.txt" {
+		t.Errorf("files: %q; want %q", got, "a.txt,sub/b.txt")
+	}
+	info := w.Info()
+	if info.Label != "working tree" || info.Commit != "" {
+		t.Errorf("info: %+v", info)
+	}
+}
+
+func TestGitSourceListDir(t *testing.T) {
+	repo := t.TempDir()
+	for name, data := range map[string]string{"a.txt": "hello", "sub/b.txt": "nested"} {
+		file := filepath.Join(repo, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte(data), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"}} {
+		if _, err := git(repo, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src, err := newGitSource(repo, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	for _, tc := range []struct {
+		dir  string
+		want string
+	}{
+		{"", "a.txt,sub"},
+		{"sub", "b.txt"},
+	} {
+		names, err := src.ListDir(tc.dir)
+		if err != nil {
+			t.Fatalf("list %q: %v", tc.dir, err)
+		}
+		if got := strings.Join(names, ","); got != tc.want {
+			t.Errorf("list %q: %q; want %q", tc.dir, got, tc.want)
+		}
+	}
+	if _, err := src.ListDir("missing"); err == nil {
+		t.Error("a missing directory must fail")
+	}
+	info := src.Info()
+	if info.Label != "HEAD" || info.Commit == "" || info.Subject != "fixture" {
+		t.Errorf("info: %+v", info)
+	}
+}
+
+func TestCleanRelRejectsPathsOutsideTheRepository(t *testing.T) {
+	for _, p := range []string{"..", "../x", "a/../../x", "/etc/passwd", "/x"} {
+		if got, err := cleanRel(p); err == nil {
+			t.Errorf("cleanRel(%q) = %q; want an error", p, got)
+		}
+	}
+	for _, tc := range []struct{ in, want string }{
+		{"a/b.kicad_sch", "a/b.kicad_sch"},
+		{"./a/../b.kicad_sch", "b.kicad_sch"},
+		{"a//b", "a/b"},
+		{"", "."},
+	} {
+		got, err := cleanRel(tc.in)
+		if err != nil || got != tc.want {
+			t.Errorf("cleanRel(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
+		}
 	}
 }
