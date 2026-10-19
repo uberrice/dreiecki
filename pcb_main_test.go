@@ -186,3 +186,37 @@ func TestOpenCmdReportsStartFailure(t *testing.T) {
 		t.Errorf("error %q should say that the report could not be opened", err)
 	}
 }
+
+// The board renderer plots the pages of the two revisions in parallel.
+func TestComparePCBRendersBothRevisions(t *testing.T) {
+	cli := fakeCLI(t, `printf '%s' '<svg viewBox="0 0 100 80"></svg>' > "$out"`)
+	board := func(net, name string) memSource {
+		return memSource{"test.kicad_pcb": `(kicad_pcb (version 20240108) (layers (0 "F.Cu" signal))
+		  (net 1 "GND") (net 2 "VCC") (net 3 "SIG")
+		  (footprint "Test:R" (layer "F.Cu") (uuid "fp1") (at 50 50)
+		    (property "Reference" "R1" (at 0 -1 0) (layer "F.SilkS") (uuid "p1"))
+		    (pad "1" smd rect (at -1 0) (size 1 1) (layers "F.Cu") (net ` + net + ` "` + name + `") (uuid "pad1"))))`}
+	}
+	srcA := board("1", "GND")
+	srcB := board("3", "SIG")
+	rep, err := comparePCB(srcA, &srcB, "test.kicad_pcb", t.TempDir(), RenderOptions{KicadCLI: cli})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Pages) == 0 {
+		t.Fatal("the board has no pages")
+	}
+	found := false
+	for _, page := range rep.Pages {
+		for _, c := range page.Changes {
+			for _, d := range c.Details {
+				if d == "Pad 1 net: GND → SIG" {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the net change of the pad is missing: %+v", rep.Pages)
+	}
+}
