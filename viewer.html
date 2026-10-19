@@ -319,16 +319,32 @@ const CATS = PCB ?
   { footprint: "Footprints", zone: "Zones", track: "Tracks", via: "Vias", text: "Text", graphic: "Graphics", net: "Nets", board: "Board" } :
   { component: "Components", sheet: "Sheets", label: "Labels", wire: "Wires", junction: "Junctions / NC", power: "Power symbols", text: "Text", graphic: "Graphics" };
 const OPS = { removed: "−", added: "+", changed: "~", moved: "↔" };
-const prefs = (() => { try { return JSON.parse(localStorage.getItem("dreiecki") || "{}"); } catch { return {}; } })();
+const MODES = ["a", "b", "diff", "swipe", "side", "blink"];
+const MAX_AREA_STEPS = 200;
+const prefs = (() => { try { const p = JSON.parse(localStorage.getItem("dreiecki") || "{}"); return p && typeof p === "object" ? p : {}; } catch { return {}; } })();
 const savePrefs = () => { try { localStorage.setItem("dreiecki", JSON.stringify(prefs)); } catch {} };
 const DEBUG = /(^|[#&])debug\b/.test(location.hash);
+
+// Deep-link area index, clamped to [0, MAX_AREA_STEPS].
+function areaSteps(v) {
+  const n = Math.floor(Number(v));
+  return Number.isFinite(n) ? Math.min(MAX_AREA_STEPS, Math.max(0, n)) : 0;
+}
+// Known categories start enabled; stored boolean choices override them.
+function filterState() {
+  const f = Object.create(null);
+  for (const k of Object.keys(CATS)) f[k] = true;
+  const saved = prefs.filters;
+  if (saved && typeof saved === "object") for (const k of Object.keys(saved)) if (typeof saved[k] === "boolean") f[k] = saved[k];
+  return f;
+}
 
 // KiCad's board colours are made for a dark background, so PCB reports start on dark paper.
 const PAPER_PREF = PCB ? "darkPaperPcb" : "darkPaper";
 const state = {
-  page: 0, mode: VIEW ? "b" : prefs.mode || "diff", boxes: prefs.boxes !== false, darkPaper: prefs[PAPER_PREF] ?? PCB,
+  page: 0, mode: VIEW ? "b" : (MODES.includes(prefs.mode) ? prefs.mode : "diff"), boxes: prefs.boxes !== false, darkPaper: prefs[PAPER_PREF] ?? PCB,
   view: { s: 1, tx: 0, ty: 0 }, swipe: 0.5, region: -1, focus: null, selected: null,
-  filters: Object.assign(Object.fromEntries(Object.keys(CATS).map((k) => [k, true])), prefs.filters || {}),
+  filters: filterState(),
   blinkSide: "a", blinkTimer: null,
   // All layers page: copper opacity and which copper layer is drawn above the others.
   opacity: prefs.copperOpacity ?? 1, top: prefs.topLayer || "F.Cu",
@@ -445,29 +461,48 @@ function runAnalysis(key, makeMessage) {
 }
 
 function loadPage(i) {
-  if (rt.has(i)) { const r = rt.get(i); rt.delete(i); rt.set(i, r); return r.ready; } // LRU touch
+  const cached = rt.get(i);
+  // A page that failed to render is rebuilt on the next visit.
+  if (cached && !cached.error) { rt.delete(i); rt.set(i, cached); return cached.ready; } // LRU touch
+  if (cached) { rt.delete(i); releasePage(i, cached); }
   const r = { ov: null, an: null };
   rt.set(i, r);
   r.ready = (async () => {
     const p = DATA.pages[i];
-    if (p.stack) {
-      const side = async (k) => ({ layers: await Promise.all(p.stack.map(async (l) =>
-        ({ layer: l.layer, copper: l.copper, img: await unpack(VIEW && k === "svgA" ? null : l[k]) }))) });
-      [r.imgA, r.imgB] = await Promise.all([side("svgA"), side("svgB")]);
-    } else {
-      [r.imgA, r.imgB] = await Promise.all([unpack(VIEW ? null : p.svgA), unpack(p.svgB)]);
+    try {
+      if (p.stack) {
+        const side = async (k) => ({ layers: await Promise.all(p.stack.map(async (l) =>
+          ({ layer: l.layer, copper: l.copper, img: await sideImage(VIEW && k === "svgA" ? null : l[k]) }))) });
+        [r.imgA, r.imgB] = await Promise.all([side("svgA"), side("svgB")]);
+      } else {
+        [r.imgA, r.imgB] = await Promise.all([sideImage(VIEW ? null : p.svgA), sideImage(p.svgB)]);
+      }
+      await rasterPage(i, r);
+    } catch (err) {
+      // Shown in the status bar instead of a blank canvas.
+      r.error = `Cannot render ${p.name}: ${err && err.message ? err.message : err}`;
+      throw err;
     }
-    await rasterPage(i, r);
   })();
   // Free memory of pages not looked at recently.
   while (rt.size > KEEP_PAGES) {
     const [old, ro] = rt.entries().next().value;
     if (old === state.page) break;
     rt.delete(old);
-    ro.ready.then(() => { for (const k of ["a", "b", "d"]) ro.ov && ro.ov[k] && ro.ov[k].close(); });
-    dropTiles(old);
+    releasePage(old, ro);
   }
   return r.ready;
+}
+// Free a page's overview bitmaps and tiles.
+function releasePage(i, r) {
+  r.ready.catch(() => {}).then(() => { for (const k of ["a", "b", "d"]) if (r.ov && r.ov[k]) r.ov[k].close(); });
+  dropTiles(i);
+}
+
+async function sideImage(b64) {
+  const img = await unpack(b64);
+  if (b64 && !img) throw new Error("the embedded image could not be decoded");
+  return img;
 }
 
 // Overview bitmaps, analysis and diff image. Stacked pages are analysed in their default look,
@@ -539,7 +574,7 @@ const tiles = new Map();
 // Two scratch canvases: a GPU-friendly one for plain renders, a CPU one for pixel readback.
 const tileCv = new OffscreenCanvas(TILE, TILE), tileCtx = tileCv.getContext("2d", { willReadFrequently: true });
 const tileCv2 = new OffscreenCanvas(TILE, TILE), tileCtx2 = tileCv2.getContext("2d");
-let queue = [], lastInteract = 0;
+let queue = [], lastInteract = 0, interactTimer = null;
 const wantedTiles = new Set();
 const stats = { rendered: 0, ms: 0 };
 
@@ -579,7 +614,8 @@ function renderTile(t, i, L, x, y, kind) {
 function pumpTiles() {
   if (!queue.length) return;
   // Don't rasterize while the user is actively zooming/panning; coarser levels stand in.
-  if (performance.now() - lastInteract < 120) { setTimeout(requestDraw, 130); return; }
+  // One pending timer only.
+  if (performance.now() - lastInteract < 120) { clearTimeout(interactTimer); interactTimer = setTimeout(requestDraw, 130); return; }
   queue.sort((a, b) => a.prio - b.prio);
   const t0 = performance.now();
   let done = 0;
@@ -911,8 +947,9 @@ function updateRegInfo() {
     state.region < 0 ? `${regs.length} area${regs.length > 1 ? "s" : ""}` : `area ${state.region + 1} / ${regs.length}`;
 }
 function updateStatus() {
-  const p = DATA.pages[state.page];
+  const p = DATA.pages[state.page], r = rt.get(state.page);
   let s = `${p.name}  ·  ${Math.round(state.view.s * 25.4)} px/in`;
+  if (r && r.error) s = `⚠ ${r.error}  ·  ${s}`;
   const ends = measureEnds();
   if (ends) {
     const dx = Math.abs(ends[1][0] - ends[0][0]), dy = Math.abs(ends[1][1] - ends[0][1]);
@@ -934,6 +971,8 @@ function renderPages() {
 }
 let changesGeneration = 0, changesPage = null;
 const changeCounts = new WeakMap();
+// A category the report may add later is not in CATS; show it under its own name.
+const catName = (cat) => (Object.hasOwn(CATS, cat) ? CATS[cat] : cat);
 function renderChanges() {
   const generation = ++changesGeneration;
   const p = DATA.pages[state.page], box = $("#changes");
@@ -942,19 +981,21 @@ function renderChanges() {
   let restoreScroll = scrollTop > 0;
   let counts = changeCounts.get(p);
   if (!counts) {
-    counts = {};
+    counts = Object.create(null);
     for (const c of p.changes) counts[c.category] = (counts[c.category] || 0) + 1;
     changeCounts.set(p, counts);
   }
   const f = $("#filters"); f.replaceChildren();
-  for (const [cat, name] of Object.entries(CATS)) {
+  const cats = Object.entries(CATS);
+  for (const cat of Object.keys(counts)) if (!Object.hasOwn(CATS, cat)) cats.push([cat, cat]);
+  for (const [cat, name] of cats) {
     if (!counts[cat]) continue;
-    f.append(el("button", { class: "chip" + (state.filters[cat] ? " on" : ""), onclick: () => { state.filters[cat] = !state.filters[cat]; prefs.filters = state.filters; savePrefs(); renderChanges(); } },
+    f.append(el("button", { class: "chip" + (state.filters[cat] !== false ? " on" : ""), onclick: () => { state.filters[cat] = state.filters[cat] === false; prefs.filters = state.filters; savePrefs(); renderChanges(); } },
       name, el("span", { class: "n" }, String(counts[cat]))));
   }
   $("#chHead").textContent = `Changes on ${p.name}`;
   box.replaceChildren();
-  const shown = p.changes.filter((c) => state.filters[c.category]);
+  const shown = p.changes.filter((c) => state.filters[c.category] !== false);
   if (!p.changes.length) {
     box.append(el("div", { class: "empty" }, p.status === "same" ? `No differences on this ${UNIT}.` :
       "No object-level changes; see highlighted areas for visual differences (e.g. title block)."));
@@ -967,7 +1008,7 @@ function renderChanges() {
     const end = Math.min(offset + 100, shown.length), start = offset, started = performance.now();
     for (; offset < end && (offset === start || performance.now() - started < 6); offset++) {
       const c = shown[offset];
-      if (c.category !== last) { fragment.append(el("div", { class: "grp" }, CATS[c.category] || c.category)); last = c.category; }
+      if (c.category !== last) { fragment.append(el("div", { class: "grp" }, catName(c.category))); last = c.category; }
       const row = el("div", { class: "ch" + (state.selected === c ? " on" : ""), title: c.op, onclick: () => selectChange(c, row) },
         el("span", { class: "op " + c.op }, OPS[c.op] || "?"),
         el("div", {}, el("span", { class: "t" }, c.title), c.subtitle ? el("span", { class: "s" }, c.subtitle) : null),
@@ -987,7 +1028,9 @@ function selectChange(c, row) {
   if (c.op === "removed" && (state.mode === "b")) setMode("a");
   if (c.op === "added" && (state.mode === "a")) setMode("b");
   drawFocus(c);
-  fit(union(c.boxA, c.boxB));
+  // A change without a box (a net, a title block) has nothing to zoom to: keep the viewport.
+  const box = union(c.boxA, c.boxB);
+  if (box) fit(box);
 }
 
 // ---------- layer stacking (All layers page) ----------
@@ -1007,7 +1050,7 @@ function restack(delay) {
   restackTimer = setTimeout(() => {
     for (const [i, r] of rt) {
       if (!DATA.pages[i].stack) continue;
-      r.ready.then(() => { if (rt.get(i) === r) { dropTiles(i); rasterPage(i, r); } });
+      r.ready.then(() => { if (rt.get(i) === r) { dropTiles(i); rasterPage(i, r); } }).catch(() => {});
     }
   }, delay);
 }
@@ -1035,7 +1078,8 @@ async function selectPage(i) {
   renderPages(); renderChanges(); updateLayerCtl();
   if (!keepView) state.measure = Object.assign(state.measure, { p1: null, p2: null, live: null });
   applyMode(); if (!keepView) fit(); updateRegInfo();
-  await loadPage(i);
+  // Load failures are reported in the status bar.
+  await loadPage(i).catch(() => {});
   if (state.page !== i) return;
   updateRegInfo(); requestDraw();
 }
@@ -1055,12 +1099,14 @@ $("#help").onclick = () => $("#help").classList.remove("on");
 function toggleBoxes() { state.boxes = !state.boxes; prefs.boxes = state.boxes; savePrefs(); $("#boxesBtn").classList.toggle("on", state.boxes); requestDraw(); }
 document.addEventListener("keydown", (ev) => {
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
-  const modes = ["a", "b", "diff", "swipe", "side", "blink"];
+  // Shortcuts must not fire while a form control has the focus.
+  const t = ev.target;
+  if (t && t.closest && t.closest("input, select, textarea, [contenteditable]")) return;
   const { w, h } = paneSize();
   if (VIEW && ["1", "2", "3", "4", "5", "6", " ", "n", "p", "h"].includes(ev.key)) return;
   switch (ev.key) {
-    case "1": case "2": case "3": case "4": case "5": case "6": setMode(modes[+ev.key - 1]); break;
-    case " ": ev.preventDefault(); setMode(state.mode === "a" ? "b" : "a"); break;
+    case "1": case "2": case "3": case "4": case "5": case "6": setMode(MODES[+ev.key - 1]); break;
+    case " ": if (t && t.tagName === "BUTTON") break; ev.preventDefault(); setMode(state.mode === "a" ? "b" : "a"); break;
     case "n": gotoRegion(1); break;
     case "p": gotoRegion(-1); break;
     case "j": if (state.page < DATA.pages.length - 1) selectPage(state.page + 1); break;
@@ -1100,11 +1146,11 @@ renderHeader();
 // Optional deep link: #mode=swipe&sheet=/power&area=2 (layer=F.Cu for boards)
 (async () => {
   const q = new URLSearchParams(location.hash.slice(1));
-  if (!VIEW && ["a", "b", "diff", "swipe", "side", "blink"].includes(q.get("mode"))) state.mode = q.get("mode");
+  if (!VIEW && MODES.includes(q.get("mode"))) state.mode = q.get("mode");
   let start = DATA.pages.findIndex((p) => p.name === (q.get("sheet") ?? q.get("layer")));
   if (start < 0) start = Math.max(0, DATA.pages.findIndex((p) => p.status !== "same")); // first sheet that differs
   await selectPage(start);
-  for (let n = +q.get("area") || 0; n > 0; n--) gotoRegion(1);
+  for (let n = areaSteps(q.get("area")); n > 0; n--) gotoRegion(1);
 })();
 </script>
 </body>
