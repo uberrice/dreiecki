@@ -380,6 +380,9 @@ func (b *Board) footprint(n *Node) *Component {
 }
 
 func hasAtom(n *Node, a string) bool {
+	if n == nil {
+		return false
+	}
 	for _, x := range n.List {
 		if !x.IsList && !x.Quoted && x.Atom == a {
 			return true

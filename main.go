@@ -58,6 +58,7 @@ func main() {
 		outFlag   = flag.String("o", "", "output HTML `file` (default: dreiecki-<a>-<b>.html, dreiecki-pcb-<a>-<b>.html with -pcb)")
 		openFlag  = flag.Bool("open", false, "open the report in the default browser")
 		cliFlag   = flag.String("kicad-cli", "", "path to kicad-cli (default: from PATH)")
+		builtin   = flag.Bool("builtin", false, "render with the built-in renderer, even if kicad-cli is installed")
 		themeFlag = flag.String("theme", "", "KiCad color theme to render with")
 		noSheet   = flag.Bool("no-drawing-sheet", false, "omit the drawing sheet / title block from the renders")
 		keepTmp   = flag.Bool("keep-temp", false, "keep the temporary render directory")
@@ -77,7 +78,7 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	opt := RenderOptions{KicadCLI: *cliFlag, Theme: *themeFlag, ExcludeDrawSheet: *noSheet}
+	opt := RenderOptions{KicadCLI: *cliFlag, Theme: *themeFlag, ExcludeDrawSheet: *noSheet, Builtin: *builtin}
 	pcb := *pcbFlag || strings.HasSuffix(*schFlag, ".kicad_pcb")
 	if err := run(refA, refB, *schFlag, *outFlag, pcb, *openFlag, *keepTmp, opt); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -143,12 +144,17 @@ func run(refA, refB, rootPath, outPath string, pcb, open, keepTmp bool, opt Rend
 	if err := checkOutputPath(outPath); err != nil {
 		return err
 	}
-	if opt.KicadCLI == "" {
-		p, err := findKicadCLI()
-		if err != nil {
-			return err
+	if opt.Builtin {
+		opt.KicadCLI = ""
+	} else if opt.KicadCLI == "" {
+		if p, err := findKicadCLI(); err == nil {
+			opt.KicadCLI = p
+		} else {
+			fmt.Fprintln(os.Stderr, "kicad-cli not found; using the built-in renderer (install KiCad 8+ for exact renders)")
 		}
-		opt.KicadCLI = p
+	}
+	if opt.KicadCLI == "" && opt.Theme != "" {
+		fmt.Fprintln(os.Stderr, "warning: -theme needs kicad-cli; the built-in renderer uses KiCad's default colours")
 	}
 	repo := cwd
 	if top, err := git(cwd, "rev-parse", "--show-toplevel"); err == nil {
@@ -362,7 +368,7 @@ func findKicadCLI() (string, error) {
 			return c, nil
 		}
 	}
-	return "", fmt.Errorf("kicad-cli not found; install KiCad 8+ or pass -kicad-cli")
+	return "", fmt.Errorf("kicad-cli not found")
 }
 
 // findRootFile resolves the root schematic or board (by ext) as a repo-relative path.

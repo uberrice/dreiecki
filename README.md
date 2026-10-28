@@ -18,8 +18,13 @@ With no revision, dreiecki renders the working tree on its own, in the same view
 comparison tools. This works outside a git repository too. An explicitly empty revision is an error:
 `empty revision: expected a commit, branch or tag`.
 
-Requirements: `git` 2.24 or newer, and `kicad-cli` from KiCad 8 or newer for rendering. The viewer works
-offline in any current browser.
+Requirements: `git` 2.24 or newer. The viewer works offline in any current browser.
+
+dreiecki renders with `kicad-cli` from KiCad 8 or newer if it finds one. Without it, or with `-builtin`,
+it uses its own renderer. That renderer needs nothing else installed, but its output is not identical
+to KiCad's: text uses a system font instead of KiCad's stroke font, the drawing sheet is always KiCad's
+default one, pin and label shapes are simplified, and `-theme` has no effect. Both revisions are drawn
+the same way, so it finds the same changes.
 
 ## What you get
 
@@ -61,10 +66,11 @@ opens a specific view; `area` steps through at most 200 differing areas.
 For each revision, dreiecki reads the needed files through a long-lived `git cat-file --batch` process,
 falling back to `git cat-file blob` for paths that contain newlines: the root sheet, every sub-sheet it
 references, the `.kicad_pro` and the drawing sheet. It writes them to a temp directory and renders them
-with `kicad-cli sch export svg`. It then compares the schematic S-expressions object by object, matching
-objects by UUID and falling back to reference or content. The pixel comparison runs in the browser. For
+with `kicad-cli sch export svg`, or draws the SVGs itself with the built-in renderer. It then compares
+the schematic S-expressions object by object, matching objects by UUID and falling back to reference
+or content. The pixel comparison runs in the browser. For
 boards, dreiecki reads the `.kicad_pcb` and project files the same way and plots each page with
-`kicad-cli pcb export svg`.
+`kicad-cli pcb export svg` or the built-in renderer.
 
 ## Flags
 
@@ -75,9 +81,10 @@ boards, dreiecki reads the `.kicad_pcb` and project files the same way and plots
                      dreiecki-view.html, dreiecki-pcb-view.html without a revision)
 -open                open in browser
 -no-drawing-sheet    leave out the title block / frame
--theme NAME          KiCad colour theme for rendering
+-theme NAME          KiCad colour theme for rendering (kicad-cli only)
 -kicad-cli PATH      kicad-cli location
--keep-temp           keep the rendered SVGs
+-builtin             use the built-in renderer even if kicad-cli is installed
+-keep-temp           keep kicad-cli's input files and rendered SVGs
 -version             print the version and exit
 ```
 
