@@ -9,9 +9,58 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// xform maps local coordinates to the page: (a*x + b*y + x0, c*x + d*y + y0).
+type xform struct{ a, b, c, d, x0, y0 float64 }
+
+var identity = xform{a: 1, d: 1}
+
+func (t xform) pt(x, y float64) (float64, float64) { return t.a*x + t.b*y + t.x0, t.c*x + t.d*y + t.y0 }
+
+// then applies o after t, ignoring o's translation.
+func (t xform) then(o xform) xform {
+	return xform{o.a*t.a + o.b*t.c, o.a*t.b + o.b*t.d, o.c*t.a + o.d*t.c, o.c*t.b + o.d*t.d,
+		o.a*t.x0 + o.b*t.y0, o.c*t.x0 + o.d*t.y0}
+}
+
+func xy(n *Node) (float64, float64) { return num(n.Arg(0)), num(n.Arg(1)) }
+
+func xyNode(x, y float64) *Node {
+	return &Node{IsList: true, List: []*Node{{Atom: "xy"}, {Atom: fmtNum(x)}, {Atom: fmtNum(y)}}}
+}
+
+// justify is -1 (left) if cond holds, 1 (right) otherwise.
+func justify(cond bool) int {
+	if cond {
+		return -1
+	}
+	return 1
+}
+
+// parallel runs f(0) ... f(n-1) on up to NumCPU goroutines and waits for them.
+func parallel(n int, f func(i int)) {
+	var wg sync.WaitGroup
+	next := make(chan int)
+	for w := 0; w < min(n, runtime.NumCPU()); w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				f(i)
+			}
+		}()
+	}
+	for i := 0; i < n; i++ {
+		next <- i
+	}
+	close(next)
+	wg.Wait()
+}
 
 // svgDoc collects the SVG of one page; coordinates are millimetres.
 type svgDoc struct{ bytes.Buffer }
@@ -40,12 +89,16 @@ func ff(f float64) string {
 
 var xmlEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
 
-// kicadText removes KiCad's text markup: escapes such as {slash} and the
-// overbar, superscript and subscript braces.
+// kicadEscapes are the {token} escapes of KiCad's UnescapeString.
+var kicadEscapes = map[string]string{
+	"slash": "/", "backslash": `\`, "colon": ":", "dblquote": `"`, "quote": "'", "lt": "<", "gt": ">",
+	"bar": "|", "comma": ",", "tab": " ", "return": "\n", "space": " ", "dollar": "$", "brace": "{",
+}
+
+// kicadText removes KiCad's text markup: the overbar, superscript and subscript
+// braces, and escapes such as {slash}. Both are read in one pass, so an escaped
+// brace never opens or closes a group.
 func kicadText(s string) string {
-	s = strings.NewReplacer("{slash}", "/", "{backslash}", `\`, "{colon}", ":", "{dblquote}", `"`,
-		"{quote}", "'", "{lt}", "<", "{gt}", ">", "{lbrace}", "{", "{rbrace}", "}", "{tab}", " ",
-		"{return}", "\n", "{space}", " ", "{dollar}", "$", "{brace}", "{").Replace(s)
 	var b strings.Builder
 	depth := 0
 	for i := 0; i < len(s); i++ {
@@ -55,6 +108,15 @@ func kicadText(s string) string {
 			i++
 		case s[i] == '}' && depth > 0:
 			depth--
+		case s[i] == '{':
+			if j := strings.IndexByte(s[i:], '}'); j > 0 {
+				if r, ok := kicadEscapes[s[i+1:i+j]]; ok {
+					b.WriteString(r)
+					i += j
+					continue
+				}
+			}
+			b.WriteByte(s[i])
 		default:
 			b.WriteByte(s[i])
 		}
@@ -66,13 +128,17 @@ func (s *svgDoc) line(x1, y1, x2, y2 float64, color string, w float64) {
 	fmt.Fprintf(s, `<path d="M%s %sL%s %s" stroke="%s" stroke-width="%s"/>`+"\n", ff(x1), ff(y1), ff(x2), ff(y2), color, ff(w))
 }
 
-// path draws d with a stroke (if w > 0 or fill is empty) and an optional fill.
+// path draws d with an optional fill and a stroke if w > 0, or a hairline if
+// there is no fill. An empty stroke colour strokes with the fill colour.
 func (s *svgDoc) path(d, stroke string, w float64, fill string) {
 	s.WriteString(`<path d="` + d + `"`)
 	if fill != "" {
 		s.WriteString(` fill="` + fill + `" fill-rule="evenodd"`)
 	}
 	if w > 0 || fill == "" {
+		if stroke == "" {
+			stroke = fill
+		}
 		fmt.Fprintf(s, ` stroke="%s" stroke-width="%s"`, stroke, ff(math.Max(w, 0.01)))
 	}
 	s.WriteString("/>\n")
@@ -84,6 +150,24 @@ func (s *svgDoc) circle(x, y, r float64, stroke string, w float64, fill string) 
 
 func circlePath(x, y, r float64) string {
 	return fmt.Sprintf("M%s %sa%s %s 0 1 0 %s 0a%s %s 0 1 0 %s 0Z", ff(x-r), ff(y), ff(r), ff(r), ff(2*r), ff(r), ff(r), ff(-2*r))
+}
+
+// rectPath is the rectangle with corners (x1, y1) and (x2, y2) through t.
+func rectPath(x1, y1, x2, y2 float64, t xform) string {
+	return ptsPath(&Node{IsList: true, List: []*Node{xyNode(x1, y1), xyNode(x2, y1), xyNode(x2, y2), xyNode(x1, y2)}}, t, true)
+}
+
+// bezierPath is the cubic Bézier of (pts (xy ...)) through t, or "" unless it has four points.
+func bezierPath(pts *Node, t xform) string {
+	var p []string
+	for _, c := range pts.Children("xy") {
+		x, y := t.pt(xy(c))
+		p = append(p, ff(x)+" "+ff(y))
+	}
+	if len(p) != 4 {
+		return ""
+	}
+	return "M" + p[0] + "C" + strings.Join(p[1:], " ")
 }
 
 // arcTo continues a path with the circular arc through (mx, my) to (ex, ey).

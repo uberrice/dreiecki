@@ -26,21 +26,6 @@ const (
 	schLine     = 0.1524 // default line width, 6 mil
 )
 
-// xform maps local coordinates to the page: (a*x + b*y + x0, c*x + d*y + y0).
-type xform struct{ a, b, c, d, x0, y0 float64 }
-
-var identity = xform{a: 1, d: 1}
-
-func (t xform) pt(x, y float64) (float64, float64) { return t.a*x + t.b*y + t.x0, t.c*x + t.d*y + t.y0 }
-
-// then applies o after t, ignoring o's translation.
-func (t xform) then(o xform) xform {
-	return xform{o.a*t.a + o.b*t.c, o.a*t.b + o.b*t.d, o.c*t.a + o.d*t.c, o.c*t.b + o.d*t.d,
-		o.a*t.x0 + o.b*t.y0, o.c*t.x0 + o.d*t.y0}
-}
-
-func xy(n *Node) (float64, float64) { return num(n.Arg(0)), num(n.Arg(1)) }
-
 // renderSheetBuiltin draws one sheet instance of p.
 func renderSheetBuiltin(p *Project, inst *SheetInst, frame bool) *RenderedPage {
 	sch := p.Parsed[inst.File]
@@ -188,7 +173,7 @@ func drawGraphic(s *svgDoc, n *Node, t xform, col string) {
 	case "rectangle":
 		x1, y1 := xy(n.Child("start"))
 		x2, y2 := xy(n.Child("end"))
-		d = ptsPath(&Node{IsList: true, List: []*Node{xyNode(x1, y1), xyNode(x2, y1), xyNode(x2, y2), xyNode(x1, y2)}}, t, true)
+		d = rectPath(x1, y1, x2, y2, t)
 	case "circle":
 		cx, cy := t.pt(xy(n.Child("center")))
 		r := num(n.Child("radius").Arg(0))
@@ -199,23 +184,11 @@ func drawGraphic(s *svgDoc, n *Node, t xform, col string) {
 		ex, ey := t.pt(xy(n.Child("end")))
 		d = fmt.Sprintf("M%s %s", ff(sx), ff(sy)) + arcTo(sx, sy, mx, my, ex, ey)
 	case "bezier":
-		var p []string
-		for _, c := range n.Child("pts").Children("xy") {
-			x, y := t.pt(xy(c))
-			p = append(p, ff(x)+" "+ff(y))
-		}
-		if len(p) != 4 {
-			return
-		}
-		d = "M" + p[0] + "C" + strings.Join(p[1:], " ")
+		d = bezierPath(n.Child("pts"), t)
 	}
 	if d != "" {
 		s.path(d, col, lw, fill)
 	}
-}
-
-func xyNode(x, y float64) *Node {
-	return &Node{IsList: true, List: []*Node{{Atom: "xy"}, {Atom: fmtNum(x)}, {Atom: fmtNum(y)}}}
 }
 
 // orient makes text with the given angle and justification, as seen through the
@@ -307,9 +280,7 @@ func drawSymbol(s *svgDoc, n *Node, libs map[string]*Node, inst *SheetInst) {
 			case "text":
 				x, y := t.pt(xy(g.Child("at")))
 				st := effects(g, textStyle{size: 1.27, color: colBody})
-				if st.angle = num(g.Child("at").Arg(2)); st.angle > 360 {
-					st.angle /= 10 // tenths of a degree in older files
-				}
+				st.angle = num(g.Child("at").Arg(2))
 				s.text(x, y, g.Arg(0), orient(st, screen))
 			case "pin":
 				pins = append(pins, g)
@@ -402,7 +373,7 @@ func drawPin(s *svgDoc, p *Node, t xform, offset float64, names, numbers bool) {
 		ax, ay = -0.3, 0
 	}
 	if names && offset > 0 {
-		name.hj = map[bool]int{true: -1, false: 1}[forward]
+		name.hj = justify(forward)
 		text(x1+dx*offset, y1+dy*offset, p.Child("name").Arg(0), name)
 	} else if names {
 		name.vj = 1
@@ -425,7 +396,11 @@ func drawLabel(s *svgDoc, n *Node) {
 	shape := func(pts [][2]float64, col string) {
 		var b strings.Builder
 		for i, p := range pts {
-			fmt.Fprintf(&b, "%s%s %s", map[bool]string{true: "M", false: "L"}[i == 0], ff(x+p[0]*dx-p[1]*dy), ff(y+p[0]*dy+p[1]*dx))
+			cmd := "L"
+			if i == 0 {
+				cmd = "M"
+			}
+			fmt.Fprintf(&b, "%s%s %s", cmd, ff(x+p[0]*dx-p[1]*dy), ff(y+p[0]*dy+p[1]*dx))
 		}
 		b.WriteString("Z")
 		s.path(b.String(), col, schLine, "")
@@ -468,7 +443,7 @@ func drawLabel(s *svgDoc, n *Node) {
 			pts = [][2]float64{{0, -h / 2}, {h, -h / 2}, {h, h / 2}, {0, h / 2}}
 		}
 		st.color, st.vj = colHier, 0
-		st.hj = map[bool]int{true: -1, false: 1}[dx > 0.5 || dy < -0.5]
+		st.hj = justify(dx > 0.5 || dy < -0.5)
 		shape(pts, colHier)
 		s.text(x+dx*h*1.3, y+dy*h*1.3, n.Arg(0), st)
 	default: // directive labels: a stem with a circle

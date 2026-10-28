@@ -12,13 +12,15 @@ import (
 	"sync"
 )
 
-// RenderOptions are passed through to kicad-cli. Without KicadCLI the built-in renderer is used.
+// RenderOptions are passed through to kicad-cli. Without KicadCLI, or with Builtin, the built-in renderer is used.
 type RenderOptions struct {
 	KicadCLI         string
 	Builtin          bool // use the built-in renderer even if kicad-cli is installed
 	Theme            string
 	ExcludeDrawSheet bool
 }
+
+func (o RenderOptions) useBuiltin() bool { return o.Builtin || o.KicadCLI == "" }
 
 // RenderedPage is the SVG of one sheet instance or board page.
 type RenderedPage struct {
@@ -38,10 +40,12 @@ var viewBoxRe = regexp.MustCompile(`viewBox="([-\d.]+) ([-\d.]+) ([\d.]+) ([\d.]
 // Render plots every page of the project with kicad-cli and returns the SVGs
 // keyed by sheet instance path.
 func Render(p *Project, workDir string, opt RenderOptions) (map[string]*RenderedPage, error) {
-	if opt.KicadCLI == "" {
+	if opt.useBuiltin() {
+		out := make([]*RenderedPage, len(p.Sheets))
+		parallel(len(p.Sheets), func(i int) { out[i] = renderSheetBuiltin(p, p.Sheets[i], !opt.ExcludeDrawSheet) })
 		pages := map[string]*RenderedPage{}
-		for _, s := range p.Sheets {
-			pages[s.Key()] = renderSheetBuiltin(p, s, !opt.ExcludeDrawSheet)
+		for i, s := range p.Sheets {
+			pages[s.Key()] = out[i]
 		}
 		return pages, nil
 	}
@@ -103,7 +107,7 @@ var cliSlots = make(chan struct{}, max(2, min(runtime.NumCPU(), 8)))
 // Stacked pages get one SVG per layer so the viewer can choose their order and opacity.
 // Pages whose layer the board doesn't have are left out.
 func RenderPCB(b *Board, pages []pcbPage, workDir string, opt RenderOptions) (map[string]*RenderedPage, error) {
-	if opt.KicadCLI == "" {
+	if opt.useBuiltin() {
 		return renderPCBBuiltin(b, pages, opt), nil
 	}
 	file, err := b.Materialize(filepath.Join(workDir, "src"))

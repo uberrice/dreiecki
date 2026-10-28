@@ -35,7 +35,7 @@ func renderBoardBuiltin(b *Board, layers []string, frame bool) *RenderedPage {
 	s := newSVG(w, h)
 	for _, l := range layers {
 		r := &boardLayer{Board: b, s: s, layer: l, color: pcbColor(l), copper: strings.HasSuffix(l, ".Cu")}
-		fmt.Fprintf(s, "<g><!-- %s -->\n", xmlEscaper.Replace(strings.ReplaceAll(l, "--", "-")))
+		fmt.Fprintf(s, "<g data-layer=\"%s\">\n", xmlEscaper.Replace(l))
 		// Zone fills first, so tracks and pads stay visible on top of them.
 		for _, n := range b.Node.List {
 			switch n.Head() {
@@ -121,7 +121,9 @@ func (r *boardLayer) item(n *Node, t xform, fp *Node) {
 			if h == "fp_text" || h == "property" {
 				txt = n.Arg(1)
 			}
-			txt = strings.NewReplacer("${REFERENCE}", propValue(fp, "Reference"), "${VALUE}", propValue(fp, "Value")).Replace(txt)
+			if fp != n { // board-level text keeps its variables
+				txt = strings.NewReplacer("${REFERENCE}", propValue(fp, "Reference"), "${VALUE}", propValue(fp, "Value")).Replace(txt)
+			}
 			if fp != n && txt == "" && h == "fp_text" {
 				return
 			}
@@ -136,8 +138,7 @@ func (r *boardLayer) item(n *Node, t xform, fp *Node) {
 
 // shape draws a line, rectangle, circle, arc, polygon or curve through t.
 func (r *boardLayer) shape(n *Node, t xform) {
-	h := n.Head()
-	h = h[strings.Index(h, "_")+1:] // gr_line, fp_line -> line; a track arc is just "arc"
+	h := strings.TrimPrefix(strings.TrimPrefix(n.Head(), "gr_"), "fp_") // a track arc is just "arc"
 	w := num(n.Child("width").Arg(0))
 	if sw := n.Child("stroke").Child("width"); sw != nil {
 		w = num(sw.Arg(0))
@@ -156,7 +157,7 @@ func (r *boardLayer) shape(n *Node, t xform) {
 	case "rect":
 		x1, y1 := xy(n.Child("start"))
 		x2, y2 := xy(n.Child("end"))
-		d = ptsPath(&Node{IsList: true, List: []*Node{xyNode(x1, y1), xyNode(x2, y1), xyNode(x2, y2), xyNode(x1, y2)}}, t, true)
+		d = rectPath(x1, y1, x2, y2, t)
 	case "circle":
 		cx, cy := pt("center")
 		ex, ey := pt("end")
@@ -172,25 +173,15 @@ func (r *boardLayer) shape(n *Node, t xform) {
 	case "poly":
 		d = ptsPath(n.Child("pts"), t, true)
 	case "curve":
-		var p []string
-		for _, c := range n.Child("pts").Children("xy") {
-			x, y := t.pt(xy(c))
-			p = append(p, ff(x)+" "+ff(y))
-		}
-		if len(p) != 4 {
-			return
-		}
-		d = "M" + p[0] + "C" + strings.Join(p[1:], " ")
+		d = bezierPath(n.Child("pts"), t)
 	}
-	if fill != "" && h != "line" && h != "arc" {
-		if w > 0 {
-			r.s.WriteString(`<path d="` + d + `" fill="` + fill + `" stroke="` + fill + `" stroke-width="` + ff(w) + `"/>` + "\n")
-		} else {
-			r.s.path(d, "", 0, fill)
-		}
+	if d == "" {
 		return
 	}
-	r.s.path(d, r.color, w, "")
+	if h == "line" || h == "arc" {
+		fill = ""
+	}
+	r.s.path(d, r.color, w, fill)
 }
 
 // pad draws a pad in its own frame; copper layers get the drill hole cut out.
@@ -276,9 +267,17 @@ func (r *boardLayer) text(n *Node, t xform, txt string) {
 	r.s.text(x, y, txt, st)
 }
 
-// renderPCBBuiltin renders the pages like RenderPCB does with kicad-cli.
+// renderPCBBuiltin renders the pages like RenderPCB does with kicad-cli, each plot on its own goroutine.
 func renderPCBBuiltin(b *Board, pages []pcbPage, opt RenderOptions) map[string]*RenderedPage {
+	type plot struct {
+		layers []string
+		frame  bool
+		out    *RenderedPage
+	}
+	var plots []*plot
 	rendered := map[string]*RenderedPage{}
+	single := map[string]*plot{}
+	stacks := map[string][]*plot{}
 	for _, pg := range pages {
 		if pg.Layer != "" && !b.has(pg.Layer) {
 			continue
@@ -290,17 +289,28 @@ func renderPCBBuiltin(b *Board, pages []pcbPage, opt RenderOptions) map[string]*
 			}
 		}
 		if !pg.Stack {
-			rendered[pg.ID] = renderBoardBuiltin(b, layers, !opt.ExcludeDrawSheet)
+			single[pg.ID] = &plot{layers: layers, frame: !opt.ExcludeDrawSheet}
+			plots = append(plots, single[pg.ID])
 			continue
 		}
-		stack := &RenderedPage{}
+		rendered[pg.ID] = &RenderedPage{}
 		for i, l := range layers {
 			// The frame goes with the topmost layer only, so it isn't drawn once per layer.
-			rp := renderBoardBuiltin(b, []string{l}, !opt.ExcludeDrawSheet && i == len(layers)-1)
-			stack.Layers = append(stack.Layers, &LayerSVG{Layer: l, SVG: rp.SVG})
-			stack.Width, stack.Height = rp.Width, rp.Height
+			p := &plot{layers: []string{l}, frame: !opt.ExcludeDrawSheet && i == len(layers)-1}
+			stacks[pg.ID] = append(stacks[pg.ID], p)
+			plots = append(plots, p)
 		}
-		rendered[pg.ID] = stack
+	}
+	parallel(len(plots), func(i int) { plots[i].out = renderBoardBuiltin(b, plots[i].layers, plots[i].frame) })
+	for id, p := range single {
+		rendered[id] = p.out
+	}
+	for id, ps := range stacks {
+		stack := rendered[id]
+		for _, p := range ps {
+			stack.Layers = append(stack.Layers, &LayerSVG{Layer: p.layers[0], SVG: p.out.SVG})
+			stack.Width, stack.Height = p.out.Width, p.out.Height
+		}
 	}
 	return rendered
 }

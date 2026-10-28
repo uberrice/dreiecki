@@ -145,6 +145,9 @@ func run(refA, refB, rootPath, outPath string, pcb, open, keepTmp bool, opt Rend
 		return err
 	}
 	if opt.Builtin {
+		if opt.KicadCLI != "" {
+			fmt.Fprintln(os.Stderr, "warning: -builtin ignores -kicad-cli")
+		}
 		opt.KicadCLI = ""
 	} else if opt.KicadCLI == "" {
 		if p, err := findKicadCLI(); err == nil {
