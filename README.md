@@ -22,8 +22,8 @@ Requirements: `git` 2.24 or newer. The viewer works offline in any current brows
 
 dreiecki renders with `kicad-cli` from KiCad 8 or newer if it finds one. Without it, or with `-builtin`,
 it uses its own renderer. That renderer needs nothing else installed, but its output is not identical
-to KiCad's: text uses a system font instead of KiCad's stroke font, the drawing sheet is always KiCad's
-default one, pin and label shapes are simplified, and `-theme` has no effect. Text-box wrapping and
+to KiCad's: the drawing sheet is always KiCad's default one, pin and label shapes are simplified,
+and `-theme` has no effect. Text uses KiCad's Newstroke font, embedded in the binary. Text-box wrapping and
 custom-pad mask/paste margins are approximate. The structured change list is independent of the
 renderer; unsupported or simplified graphics can hide changes from the visual comparison.
 
@@ -85,6 +85,7 @@ boards, dreiecki reads the `.kicad_pcb` and project files the same way and plots
 -theme NAME          KiCad colour theme for rendering (kicad-cli only)
 -kicad-cli PATH      kicad-cli location
 -builtin             use the built-in renderer even if kicad-cli is installed
+-licenses            print bundled font copyright notices and license terms
 -keep-temp           keep kicad-cli's input files and rendered SVGs
 -version             print the version and exit
 ```
@@ -94,3 +95,14 @@ boards, dreiecki reads the `.kicad_pcb` and project files the same way and plots
 ## License
 
 GPL-3.0. See [LICENSE](LICENSE) for the full text.
+
+## Bundled font
+
+The built-in renderer embeds KiCad's Newstroke glyph data and draws text as SVG paths.
+No font installation or KiCad installation is required. Copyright notices and the
+MIT and SIL Open Font License terms for the CJK additions are in
+[fonts/newstroke/NOTICE.txt](fonts/newstroke/NOTICE.txt). The GPL-covered portions
+are distributed under [GPLv3](LICENSE), as permitted by their GPL-2.0-or-later grant.
+Run `dreiecki -licenses` to read these notices and license terms from the binary.
+The upstream revision and regeneration instructions are recorded in the notice
+and [tools/bundle_newstroke.py](tools/bundle_newstroke.py).

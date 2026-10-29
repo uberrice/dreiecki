@@ -388,8 +388,7 @@ func (r *boardLayer) padMargin(n, fp *Node, w, h float64) (float64, float64) {
 	return 0, 0
 }
 
-// textBox draws the optional border and wraps text using the same font estimate
-// as other built-in text. System font metrics can differ from KiCad's font.
+// textBox draws the optional border and wraps text using the bundled font metrics.
 func (r *boardLayer) textBox(n *Node, t xform, fp *Node) {
 	var corners [][2]float64
 	if pts := n.Child("pts").Children("xy"); len(pts) == 4 {
@@ -441,7 +440,11 @@ func (r *boardLayer) textBox(n *Node, t xform, fp *Node) {
 	if fp != n {
 		txt = strings.NewReplacer("${REFERENCE}", propValue(fp, "Reference"), "${VALUE}", propValue(fp, "Value")).Replace(txt)
 	}
-	txt = wrapText(txt, math.Max(0, right-left), st.size)
+	textSize := st.size
+	if st.width > 0 {
+		textSize = st.width
+	}
+	txt = wrapText(txt, math.Max(0, right-left), textSize)
 	x, y := (left+right)/2, (top+bottom)/2
 	if st.hj < 0 {
 		x = left

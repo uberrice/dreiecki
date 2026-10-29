@@ -139,7 +139,7 @@ func TestRenderBuiltinSchematic(t *testing.T) {
 		}
 	}
 	// Hidden fields, hidden pin numbers and the "~" placeholder name.
-	for _, unwanted := range []string{">R_0603<", ">R7<", `fill="` + colPinNum + `"`, ">~<"} {
+	for _, unwanted := range []string{">R_0603<", ">R7<", `stroke="` + colPinNum + `"`, ">~<"} {
 		if strings.Contains(svg, unwanted) {
 			t.Errorf("SVG contains hidden text %s", unwanted)
 		}

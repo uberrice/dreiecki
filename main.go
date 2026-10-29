@@ -62,10 +62,16 @@ func main() {
 		themeFlag = flag.String("theme", "", "KiCad color theme to render with")
 		noSheet   = flag.Bool("no-drawing-sheet", false, "omit the drawing sheet / title block from the renders")
 		keepTmp   = flag.Bool("keep-temp", false, "keep the temporary render directory")
+		licenses  = flag.Bool("licenses", false, "print bundled font notices and license terms and exit")
 		verFlag   = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Usage = usage
 	args := parseArgs(flag.CommandLine, os.Args[1:])
+
+	if *licenses {
+		fmt.Print(strokeFontNotices, "\n", projectLicense)
+		return
+	}
 
 	if *verFlag {
 		fmt.Println("dreiecki", version)

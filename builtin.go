@@ -1,8 +1,8 @@
 package main
 
 // The built-in renderer draws schematics and boards as SVG without kicad-cli.
-// It is less faithful than KiCad's own plotter (system fonts instead of the
-// stroke font, the default drawing sheet only, simplified pin and label shapes),
+// It embeds KiCad's Newstroke font, but is less faithful than KiCad's own plotter
+// (the default drawing sheet only, simplified pin and label shapes),
 // and simplified graphics can hide changes in the visual comparison. The
 // structured comparison does not depend on this renderer.
 
@@ -70,7 +70,7 @@ func newSVG(w, h float64) *svgDoc {
 	s := &svgDoc{}
 	fmt.Fprintf(s, `<svg xmlns="http://www.w3.org/2000/svg" width="%smm" height="%smm" viewBox="0 0 %s %s">`+"\n",
 		ff(w), ff(h), ff(w), ff(h))
-	s.WriteString(`<g fill="none" stroke-linecap="round" stroke-linejoin="round" font-family="sans-serif">` + "\n")
+	s.WriteString(`<g fill="none" stroke-linecap="round" stroke-linejoin="round">` + "\n")
 	return s
 }
 
@@ -204,12 +204,15 @@ func arcTo(sx, sy, mx, my, ex, ey float64) string {
 
 // textStyle describes a text in KiCad terms. Angles are counterclockwise degrees.
 type textStyle struct {
-	size   float64 // glyph height, mm
-	color  string
-	hj, vj int // -1 left/top, 0 centre, 1 right/bottom
-	angle  float64
-	mirror bool
-	bold   bool
+	size      float64 // glyph height, mm
+	width     float64 // glyph width scale, mm; zero uses size
+	thickness float64 // stroke width, mm; zero uses the default
+	color     string
+	hj, vj    int // -1 left/top, 0 centre, 1 right/bottom
+	angle     float64
+	mirror    bool
+	bold      bool
+	italic    bool
 }
 
 // text draws possibly multi-line text anchored at (x, y).
@@ -228,7 +231,6 @@ func (s *svgDoc) text(x, y float64, str string, st textStyle) {
 	case 1:
 		base = -float64(len(lines)-1) * lh
 	}
-	anchor := [3]string{"start", "middle", "end"}[st.hj+1]
 	tf := fmt.Sprintf("translate(%s %s)", ff(x), ff(y))
 	if st.angle != 0 {
 		tf += fmt.Sprintf(" rotate(%s)", ff(-st.angle))
@@ -236,20 +238,42 @@ func (s *svgDoc) text(x, y float64, str string, st textStyle) {
 	if st.mirror {
 		tf += " scale(-1 1)"
 	}
-	fmt.Fprintf(s, `<text transform="%s" font-size="%s" fill="%s" stroke="none" text-anchor="%s"`, tf, ff(st.size*1.4), st.color, anchor)
-	if st.bold {
-		s.WriteString(` font-weight="bold"`)
+	thickness := st.thickness
+	if thickness <= 0 {
+		thickness = st.size / 8
+		if st.bold {
+			thickness = st.size / 5
+		}
 	}
-	s.WriteString(">")
-	for i, l := range lines {
-		fmt.Fprintf(s, `<tspan x="0" y="%s">%s</tspan>`, ff(base+float64(i)*lh), xmlEscaper.Replace(l))
+	fmt.Fprintf(s, `<g transform="%s" fill="none" stroke="%s" stroke-width="%s">`+"\n", tf, st.color, ff(thickness))
+	// Preserve readable text for SVG accessibility and inspection without depending on fonts.
+	fmt.Fprintf(s, "<title>%s</title>\n", xmlEscaper.Replace(str))
+	sx := st.size
+	if st.width > 0 {
+		sx = st.width
 	}
-	s.WriteString("</text>\n")
+	for i, line := range lines {
+		w := strokeLineWidth(line, sx)
+		left := -w / 2
+		if st.hj < 0 {
+			left = 0
+		} else if st.hj > 0 {
+			left = -w
+		}
+		if d := strokeLinePath(line, left, base+float64(i)*lh, st); d != "" {
+			fmt.Fprintf(s, `<path d="%s"/>`+"\n", d)
+		}
+	}
+	s.WriteString("</g>\n")
 }
 
-// textWidth estimates the width of a single line of text.
+// textWidth measures the widest line using the bundled font's advances.
 func textWidth(str string, size float64) float64 {
-	return float64(len([]rune(kicadText(str)))) * size * 0.8
+	var width float64
+	for _, line := range strings.Split(kicadText(str), "\n") {
+		width = math.Max(width, strokeLineWidth(line, size))
+	}
+	return width
 }
 
 // effects reads the font size, justification and mirroring of an (effects ...) node.
@@ -258,7 +282,10 @@ func effects(n *Node, st textStyle) textStyle {
 	if f := e.Child("font"); f != nil {
 		if sz := f.Child("size"); sz != nil {
 			st.size = num(sz.Arg(0))
+			st.width = num(sz.Arg(1))
 		}
+		st.thickness = num(f.Child("thickness").Arg(0))
+		st.italic = f.Child("italic") != nil && f.Child("italic").Arg(0) != "no" || hasAtom(f, "italic")
 		st.bold = f.Child("bold") != nil && f.Child("bold").Arg(0) != "no" || hasAtom(f, "bold")
 	}
 	if j := e.Child("justify"); j != nil {
