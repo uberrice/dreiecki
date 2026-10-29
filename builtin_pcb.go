@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
+	"path"
 	"strings"
 )
 
@@ -33,8 +35,9 @@ func pcbColor(l string) string {
 func renderBoardBuiltin(b *Board, layers []string, frame bool) *RenderedPage {
 	w, h := paperSize(b.Node)
 	s := newSVG(w, h)
+	margins := boardPadMargins(b)
 	for _, l := range layers {
-		r := &boardLayer{Board: b, s: s, layer: l, color: pcbColor(l), copper: strings.HasSuffix(l, ".Cu")}
+		r := &boardLayer{Board: b, s: s, layer: l, color: pcbColor(l), copper: strings.HasSuffix(l, ".Cu"), margins: margins}
 		fmt.Fprintf(s, "<g data-layer=\"%s\">\n", xmlEscaper.Replace(l))
 		// Zone fills first, so tracks and pads stay visible on top of them.
 		for _, n := range b.Node.List {
@@ -60,10 +63,11 @@ func renderBoardBuiltin(b *Board, layers []string, frame bool) *RenderedPage {
 
 type boardLayer struct {
 	*Board
-	s      *svgDoc
-	layer  string
-	color  string
-	copper bool
+	s       *svgDoc
+	layer   string
+	color   string
+	copper  bool
+	margins padMargins
 }
 
 func (r *boardLayer) on(n *Node) bool { return indexOf(r.nodeLayers(n), r.layer) >= 0 }
@@ -113,7 +117,7 @@ func (r *boardLayer) item(n *Node, t xform, fp *Node) {
 		}
 	case "pad":
 		if r.on(n) {
-			r.pad(n, t)
+			r.pad(n, t, fp)
 		}
 	case "gr_text", "fp_text", "property":
 		if r.on(n) && !fieldHidden(n) && (h != "property" || n.Child("layer") != nil) {
@@ -128,6 +132,10 @@ func (r *boardLayer) item(n *Node, t xform, fp *Node) {
 				return
 			}
 			r.text(n, t, txt)
+		}
+	case "gr_text_box", "fp_text_box":
+		if r.on(n) && !fieldHidden(n) {
+			r.textBox(n, t, fp)
 		}
 	case "dimension":
 		if gt := n.Child("gr_text"); gt != nil && r.on(n) {
@@ -185,10 +193,19 @@ func (r *boardLayer) shape(n *Node, t xform) {
 }
 
 // pad draws a pad in its own frame; copper layers get the drill hole cut out.
-func (r *boardLayer) pad(n *Node, t xform) {
+func (r *boardLayer) pad(n *Node, t xform, fp *Node) {
 	px, py, a := atOf(n)
 	x, y := t.pt(px, py)
 	w, h := xy(n.Child("size"))
+	if w <= 0 || h <= 0 {
+		return
+	}
+	ow, oh := w, h
+	mx, my := r.padMargin(n, fp, w, h)
+	w, h = w+2*mx, h+2*my
+	if w <= 0 || h <= 0 {
+		return
+	}
 	var d string
 	switch n.Arg(2) {
 	case "circle":
@@ -196,7 +213,7 @@ func (r *boardLayer) pad(n *Node, t xform) {
 	case "oval":
 		d = roundRect(w, h, math.Min(w, h)/2)
 	case "roundrect":
-		d = roundRect(w, h, num(n.Child("roundrect_rratio").Arg(0))*math.Min(w, h))
+		d = roundRect(w, h, num(n.Child("roundrect_rratio").Arg(0))*math.Min(ow, oh)+math.Min(mx, my))
 	case "custom":
 		if n.Child("options").Child("anchor").Arg(0) == "circle" {
 			d = circlePath(0, 0, w/2)
@@ -227,11 +244,14 @@ func (r *boardLayer) pad(n *Node, t xform) {
 		r.s.path(d, "", 0, r.color)
 	}
 	if n.Arg(2) == "custom" {
+		// Custom outlines use an approximate scaled margin.
+		fmt.Fprintf(r.s, `<g transform="scale(%s %s)">`, ff(w/ow), ff(h/oh))
 		for _, g := range orEmpty(n.Child("primitives")).List {
 			if g.IsList && strings.HasPrefix(g.Head(), "gr_") {
 				r.shape(g, identity)
 			}
 		}
+		r.s.WriteString("</g>\n")
 	}
 	r.s.WriteString("</g>\n")
 }
@@ -278,16 +298,8 @@ func renderPCBBuiltin(b *Board, pages []pcbPage, opt RenderOptions) map[string]*
 	rendered := map[string]*RenderedPage{}
 	single := map[string]*plot{}
 	stacks := map[string][]*plot{}
-	for _, pg := range pages {
-		if pg.Layer != "" && !b.has(pg.Layer) {
-			continue
-		}
-		var layers []string
-		for _, l := range pg.Layers {
-			if b.has(l) {
-				layers = append(layers, l)
-			}
-		}
+	for _, pg := range resolvePCBPages(b, pages) {
+		layers := pg.layers
 		if !pg.Stack {
 			single[pg.ID] = &plot{layers: layers, frame: !opt.ExcludeDrawSheet}
 			plots = append(plots, single[pg.ID])
@@ -313,4 +325,156 @@ func renderPCBBuiltin(b *Board, pages []pcbPage, opt RenderOptions) map[string]*
 		}
 	}
 	return rendered
+}
+
+// padMargins holds board defaults in millimetres; ratio is per side, as in KiCad.
+type padMargins struct{ mask, paste, ratio float64 }
+
+func boardPadMargins(b *Board) padMargins {
+	setup := b.Node.Child("setup")
+	m := padMargins{num(setup.Child("pad_to_mask_clearance").Arg(0)), num(setup.Child("pad_to_paste_clearance").Arg(0)), num(setup.Child("pad_to_paste_clearance_ratio").Arg(0))}
+	// Modern boards store these defaults in the project rather than the board setup.
+	var pro struct {
+		Board struct {
+			DesignSettings struct {
+				Rules struct {
+					Mask  *float64 `json:"solder_mask_clearance"`
+					Paste *float64 `json:"solder_paste_clearance"`
+					Ratio *float64 `json:"solder_paste_margin_ratio"`
+				} `json:"rules"`
+			} `json:"design_settings"`
+		} `json:"board"`
+	}
+	if json.Unmarshal(b.Files[path.Join(path.Dir(b.Root), b.Name+".kicad_pro")], &pro) == nil {
+		rules := pro.Board.DesignSettings.Rules
+		if rules.Mask != nil {
+			m.mask = *rules.Mask
+		}
+		if rules.Paste != nil {
+			m.paste = *rules.Paste
+		}
+		if rules.Ratio != nil {
+			m.ratio = *rules.Ratio
+		}
+	}
+	return m
+}
+
+func (r *boardLayer) padMargin(n, fp *Node, w, h float64) (float64, float64) {
+	// KiCad 9 made an explicit zero an override. In older files zero inherits.
+	legacy := num(r.Node.Child("version").Arg(0)) <= 20240201
+	inherit := func(padKey, fpKey string, def float64) float64 {
+		if v := n.Child(padKey); v != nil && (!legacy || num(v.Arg(0)) != 0) {
+			return num(v.Arg(0))
+		}
+		v := fp.Child(fpKey)
+		if v == nil && fpKey == "solder_paste_ratio" {
+			v = fp.Child("solder_paste_margin_ratio")
+		}
+		if v != nil && (!legacy || num(v.Arg(0)) != 0) {
+			return num(v.Arg(0))
+		}
+		return def
+	}
+	switch {
+	case strings.HasSuffix(r.layer, ".Mask"):
+		m := inherit("solder_mask_margin", "solder_mask_margin", r.margins.mask)
+		return m, m
+	case strings.HasSuffix(r.layer, ".Paste"):
+		m := inherit("solder_paste_margin", "solder_paste_margin", r.margins.paste)
+		ratio := inherit("solder_paste_margin_ratio", "solder_paste_ratio", r.margins.ratio)
+		return m + w*ratio, m + h*ratio
+	}
+	return 0, 0
+}
+
+// textBox draws the optional border and wraps text using the same font estimate
+// as other built-in text. System font metrics can differ from KiCad's font.
+func (r *boardLayer) textBox(n *Node, t xform, fp *Node) {
+	var corners [][2]float64
+	if pts := n.Child("pts").Children("xy"); len(pts) == 4 {
+		for _, p := range pts {
+			x, y := xy(p)
+			corners = append(corners, [2]float64{x, y})
+		}
+	} else {
+		x1, y1 := xy(n.Child("start"))
+		x2, y2 := xy(n.Child("end"))
+		corners = [][2]float64{{x1, y1}, {x2, y1}, {x2, y2}, {x1, y2}}
+	}
+	var border strings.Builder
+	for i, p := range corners {
+		x, y := t.pt(p[0], p[1])
+		cmd := "L"
+		if i == 0 {
+			cmd = "M"
+		}
+		fmt.Fprintf(&border, "%s%s %s", cmd, ff(x), ff(y))
+	}
+	border.WriteString("Z")
+	stroke := n.Child("stroke")
+	if stroke != nil && stroke.Child("type").Arg(0) != "none" && n.Child("border").Arg(0) != "no" {
+		r.s.path(border.String(), r.color, num(stroke.Child("width").Arg(0)), "")
+	}
+	// Project corners into the text's axes. This also handles rotated four-point boxes.
+	angle := num(n.Child("angle").Arg(0))
+	sa, ca := math.Sincos(angle * math.Pi / 180)
+	left, top, right, bottom := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+	for _, p := range corners {
+		x, y := ca*p[0]-sa*p[1], sa*p[0]+ca*p[1]
+		left = math.Min(left, x)
+		right = math.Max(right, x)
+		top = math.Min(top, y)
+		bottom = math.Max(bottom, y)
+	}
+	st := effects(n, textStyle{size: 1, color: r.color, hj: -1, vj: -1})
+	inset := st.size * 0.5
+	if m := n.Child("margins"); m != nil {
+		left, top, right, bottom = left+num(m.Arg(0)), top+num(m.Arg(1)), right-num(m.Arg(2)), bottom-num(m.Arg(3))
+	} else {
+		left, top, right, bottom = left+inset, top+inset, right-inset, bottom-inset
+	}
+	txt := n.Arg(0)
+	if hasAtom(n, "locked") && txt == "locked" {
+		txt = n.Arg(1)
+	}
+	if fp != n {
+		txt = strings.NewReplacer("${REFERENCE}", propValue(fp, "Reference"), "${VALUE}", propValue(fp, "Value")).Replace(txt)
+	}
+	txt = wrapText(txt, math.Max(0, right-left), st.size)
+	x, y := (left+right)/2, (top+bottom)/2
+	if st.hj < 0 {
+		x = left
+	} else if st.hj > 0 {
+		x = right
+	}
+	if st.vj < 0 {
+		y = top
+	} else if st.vj > 0 {
+		y = bottom
+	}
+	x, y = t.pt(ca*x+sa*y, -sa*x+ca*y)
+	st.angle = angle + math.Atan2(t.b, t.a)*180/math.Pi
+	r.s.text(x, y, txt, st)
+}
+
+func wrapText(txt string, width, size float64) string {
+	var lines []string
+	for _, line := range strings.Split(txt, "\n") {
+		current := ""
+		for _, word := range strings.Fields(line) {
+			candidate := word
+			if current != "" {
+				candidate = current + " " + word
+			}
+			if current != "" && textWidth(candidate, size) > width {
+				lines = append(lines, current)
+				current = word
+			} else {
+				current = candidate
+			}
+		}
+		lines = append(lines, current)
+	}
+	return strings.Join(lines, "\n")
 }

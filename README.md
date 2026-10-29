@@ -23,8 +23,9 @@ Requirements: `git` 2.24 or newer. The viewer works offline in any current brows
 dreiecki renders with `kicad-cli` from KiCad 8 or newer if it finds one. Without it, or with `-builtin`,
 it uses its own renderer. That renderer needs nothing else installed, but its output is not identical
 to KiCad's: text uses a system font instead of KiCad's stroke font, the drawing sheet is always KiCad's
-default one, pin and label shapes are simplified, and `-theme` has no effect. Both revisions are drawn
-the same way, so it finds the same changes.
+default one, pin and label shapes are simplified, and `-theme` has no effect. Text-box wrapping and
+custom-pad mask/paste margins are approximate. The structured change list is independent of the
+renderer; unsupported or simplified graphics can hide changes from the visual comparison.
 
 ## What you get
 

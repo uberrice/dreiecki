@@ -267,6 +267,7 @@ func drawSymbol(s *svgDoc, n *Node, libs map[string]*Node, inst *SheetInst) {
 	}
 	units := map[int]bool{}
 	var pins []*Node
+	var body bounds
 	for _, sub := range lib.Children("symbol") {
 		u, st := unitStyle(sub.Arg(0))
 		units[u] = u > 0
@@ -277,6 +278,13 @@ func drawSymbol(s *svgDoc, n *Node, libs map[string]*Node, inst *SheetInst) {
 			switch g.Head() {
 			case "polyline", "rectangle", "circle", "arc", "bezier":
 				drawGraphic(s, g, t, colBody)
+				body.addLocal(g)
+				if g.Head() == "circle" {
+					cx, cy := xy(g.Child("center"))
+					r := num(g.Child("radius").Arg(0))
+					body.add(cx-r, cy-r)
+					body.add(cx+r, cy+r)
+				}
 			case "text":
 				x, y := t.pt(xy(g.Child("at")))
 				st := effects(g, textStyle{size: 1.27, color: colBody})
@@ -322,6 +330,32 @@ func drawSymbol(s *svgDoc, n *Node, libs map[string]*Node, inst *SheetInst) {
 		st := effects(pr, textStyle{size: 1.27, color: col, angle: a})
 		s.text(x, y, val, orient(st, screen))
 	}
+	if n.Child("dnp").Arg(0) == "yes" {
+		// The marker spans the selected body, including common graphics, and follows
+		// the symbol transform. A fallback keeps pin-only symbols visible as DNP.
+		x1, y1, x2, y2 := -1.27, -1.27, 1.27, 1.27
+		for i, x := range body.xs {
+			y := body.ys[i]
+			if i == 0 {
+				x1, y1, x2, y2 = x, y, x, y
+			} else {
+				x1 = math.Min(x1, x)
+				y1 = math.Min(y1, y)
+				x2 = math.Max(x2, x)
+				y2 = math.Max(y2, y)
+			}
+		}
+		const pad = 0.5
+		ax, ay := t.pt(x1-pad, y1-pad)
+		bx, by := t.pt(x2+pad, y2+pad)
+		cx, cy := t.pt(x1-pad, y2+pad)
+		dx, dy := t.pt(x2+pad, y1-pad)
+		s.WriteString(`<g data-dnp="yes">`)
+		s.line(ax, ay, bx, by, "#ff0000", 2*schLine)
+		s.line(cx, cy, dx, dy, "#ff0000", 2*schLine)
+		s.WriteString("</g>\n")
+	}
+
 }
 
 // drawPin draws a library pin, its name and number through t.

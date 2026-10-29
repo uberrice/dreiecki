@@ -3,7 +3,8 @@ package main
 // The built-in renderer draws schematics and boards as SVG without kicad-cli.
 // It is less faithful than KiCad's own plotter (system fonts instead of the
 // stroke font, the default drawing sheet only, simplified pin and label shapes),
-// but both revisions are drawn the same way, which is what the diff needs.
+// and simplified graphics can hide changes in the visual comparison. The
+// structured comparison does not depend on this renderer.
 
 import (
 	"bytes"

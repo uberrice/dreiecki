@@ -103,6 +103,33 @@ func readSVG(file string) (*RenderedPage, error) {
 // cliSlots limits concurrent kicad-cli runs; PCB reports start one per layer and revision.
 var cliSlots = make(chan struct{}, max(2, min(runtime.NumCPU(), 8)))
 
+// pcbRenderPage keeps the report page and its board-specific plotting layers.
+// index preserves stable output filenames when a page is absent on this revision.
+type pcbRenderPage struct {
+	pcbPage
+	index  int
+	layers []string
+}
+
+// resolvePCBPages selects pages present on b and filters their layers without
+// changing the requested order or mutating the report's shared page plan.
+func resolvePCBPages(b *Board, pages []pcbPage) []pcbRenderPage {
+	var resolved []pcbRenderPage
+	for i, pg := range pages {
+		if pg.Layer != "" && !b.has(pg.Layer) {
+			continue
+		}
+		page := pcbRenderPage{pcbPage: pg, index: i}
+		for _, layer := range pg.Layers {
+			if b.has(layer) {
+				page.layers = append(page.layers, layer)
+			}
+		}
+		resolved = append(resolved, page)
+	}
+	return resolved
+}
+
 // RenderPCB plots each page's layers into its own SVG, keyed by page ID.
 // Stacked pages get one SVG per layer so the viewer can choose their order and opacity.
 // Pages whose layer the board doesn't have are left out.
@@ -174,16 +201,8 @@ func RenderPCB(b *Board, pages []pcbPage, workDir string, opt RenderOptions) (ma
 			done(rp)
 		}()
 	}
-	for i, pg := range pages {
-		if pg.Layer != "" && !b.has(pg.Layer) {
-			continue
-		}
-		var layers []string
-		for _, l := range pg.Layers {
-			if b.has(l) {
-				layers = append(layers, l)
-			}
-		}
+	for _, pg := range resolvePCBPages(b, pages) {
+		i, layers := pg.index, pg.layers
 		if !pg.Stack {
 			id := pg.ID
 			plot(layers, filepath.Join(outDir, fmt.Sprintf("%02d.svg", i)), func(rp *RenderedPage) { rendered[id] = rp })
@@ -214,16 +233,10 @@ func renderPCBBatch(b *Board, pages []pcbPage, file, outDir string, opt RenderOp
 		return nil, false
 	}
 	var stackLayers, detailLayers []string
-	for _, pg := range pages {
-		if pg.Layer != "" && !b.has(pg.Layer) {
-			continue
-		}
+	resolved := resolvePCBPages(b, pages)
+	for _, pg := range resolved {
 		if pg.Stack {
-			for _, l := range pg.Layers {
-				if b.has(l) {
-					stackLayers = union(stackLayers, []string{l})
-				}
-			}
+			stackLayers = union(stackLayers, pg.layers)
 		} else {
 			// The detail page consists of its own layer and the board outline.
 			if pg.Layer == "" || len(pg.Layers) != 2 || pg.Layers[0] != pg.Layer || pg.Layers[1] != "Edge.Cuts" {
@@ -282,16 +295,13 @@ func renderPCBBatch(b *Board, pages []pcbPage, file, outDir string, opt RenderOp
 		return nil, false
 	}
 	rendered := map[string]*RenderedPage{}
-	for _, pg := range pages {
-		if pg.Layer != "" && !b.has(pg.Layer) {
-			continue
-		}
+	for _, pg := range resolved {
 		if !pg.Stack {
 			rendered[pg.ID] = detail[pg.Layer]
 			continue
 		}
 		stack := &RenderedPage{}
-		for _, l := range pg.Layers {
+		for _, l := range pg.layers {
 			if rp := overview[l]; rp != nil {
 				stack.Layers = append(stack.Layers, &LayerSVG{Layer: l, SVG: rp.SVG})
 				stack.Width, stack.Height = rp.Width, rp.Height

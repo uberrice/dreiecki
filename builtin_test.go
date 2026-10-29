@@ -1,13 +1,16 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -310,7 +313,7 @@ func TestRunFallsBackToBuiltin(t *testing.T) {
 	}
 }
 
-func captureStderr(t *testing.T, f func()) string {
+func captureStderr(t *testing.T, f func()) (output string) {
 	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -318,32 +321,124 @@ func captureStderr(t *testing.T, f func()) string {
 	}
 	old := os.Stderr
 	os.Stderr = w
-	done := make(chan string)
+	done := make(chan string, 1)
 	go func() {
 		b, _ := io.ReadAll(r)
+		r.Close()
 		done <- string(b)
 	}()
-	defer func() { os.Stderr = old }()
+	// Fatal calls Goexit, so cleanup must run even when f never returns.
+	defer func() {
+		os.Stderr = old
+		w.Close()
+		output = <-done
+	}()
 	f()
-	w.Close()
-	return <-done
+	return
+}
+
+func TestCaptureStderrCleanup(t *testing.T) {
+	old := os.Stderr
+	for _, exit := range []string{"return", "panic", "Goexit"} {
+		t.Run(exit, func(t *testing.T) {
+			var captured *os.File
+			finished := make(chan struct{})
+			go func() {
+				defer close(finished)
+				defer func() { _ = recover() }()
+				output := captureStderr(t, func() {
+					captured = os.Stderr
+					_, _ = io.WriteString(os.Stderr, "captured output")
+					switch exit {
+					case "panic":
+						panic("callback failed")
+					case "Goexit":
+						runtime.Goexit() // the mechanism used by t.Fatal
+					}
+				})
+				if output != "captured output" {
+					t.Errorf("captured %q", output)
+				}
+			}()
+			<-finished
+			if os.Stderr != old {
+				t.Error("stderr was not restored")
+			}
+			if _, err := captured.Stat(); !errors.Is(err, os.ErrClosed) {
+				t.Errorf("capture writer remains open: %v", err)
+			}
+		})
+	}
 }
 
 var pathDataRe = regexp.MustCompile(`\sd="([^"]*)"`)
-var coordRe = regexp.MustCompile(`-?\d+(?:\.\d+)?`)
+var pathTokenRe = regexp.MustCompile(`[A-Za-z]|[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?`)
 
-// pathPoints lists the points of all paths in svg, rounded to 0.01 mm and sorted.
-// It suits paths made of absolute moves and lines only.
-func pathPoints(svg []byte) []string {
-	var pts []string
+// lineSubpaths compares the ordered vertices of each absolute M/L subpath,
+// rounded to 0.01 mm. Sorting subpaths allows different drawing orders but
+// preserves connectivity and move boundaries. Unsupported commands fail the
+// test instead of silently treating curve parameters as coordinates.
+func lineSubpaths(t *testing.T, svg []byte) []string {
+	t.Helper()
+	var paths []string
 	for _, m := range pathDataRe.FindAllSubmatch(svg, -1) {
-		n := coordRe.FindAll(m[1], -1)
-		for i := 0; i+1 < len(n); i += 2 {
-			pts = append(pts, ff(math.Round(num(string(n[i]))*100)/100)+" "+ff(math.Round(num(string(n[i+1]))*100)/100))
+		tokens := pathTokenRe.FindAllString(string(m[1]), -1)
+		var points []string
+		flush := func(closed bool) {
+			if len(points) == 0 {
+				return
+			}
+			kind := "open:"
+			if closed {
+				kind = "closed:"
+			}
+			paths = append(paths, kind+strings.Join(points, ";"))
+			points = nil
+		}
+		command := ""
+		for i := 0; i < len(tokens); {
+			switch tokens[i] {
+			case "M", "L":
+				command = tokens[i]
+				i++
+				if command == "M" {
+					flush(false)
+				}
+			case "Z", "z":
+				flush(true)
+				command = ""
+				i++
+				continue
+			}
+			if command == "" || i+1 >= len(tokens) {
+				t.Fatalf("unsupported line path %q", m[1])
+			}
+			x, errX := strconv.ParseFloat(tokens[i], 64)
+			y, errY := strconv.ParseFloat(tokens[i+1], 64)
+			if errX != nil || errY != nil {
+				t.Fatalf("unsupported command or coordinate in line path %q", m[1])
+			}
+			points = append(points, ff(math.Round(x*100)/100)+" "+ff(math.Round(y*100)/100))
+			i += 2
+			command = "L" // repeated pairs after M are implicit lines
+		}
+		flush(false)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func TestLineSubpathsPreserveConnectivity(t *testing.T) {
+	original := `<path d="M0 0L1 0L1 1"/>`
+	for _, different := range []string{
+		`<path d="M0 0L1 1L1 0"/>`,  // same vertices, different edges
+		`<path d="M0 0L1 0M1 1"/>`,  // same vertices, disconnected subpath
+		`<path d="M0 0L1 0L1 1Z"/>`, // closing edge must be preserved
+	} {
+		if strings.Join(lineSubpaths(t, []byte(original)), "|") == strings.Join(lineSubpaths(t, []byte(different)), "|") {
+			t.Errorf("comparison equates %s with %s", original, different)
 		}
 	}
-	sort.Strings(pts)
-	return pts
 }
 
 // Symbol placement in every orientation, compared with kicad-cli's own plot.
@@ -386,8 +481,8 @@ func TestBuiltinMatchesKiCadGeometry(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := p.Sheets[0].Key()
-	want, got := pathPoints(kicad[key].SVG), pathPoints(builtin[key].SVG)
+	want, got := lineSubpaths(t, kicad[key].SVG), lineSubpaths(t, builtin[key].SVG)
 	if strings.Join(got, ";") != strings.Join(want, ";") {
-		t.Errorf("points differ:\nbuilt-in %v\nkicad-cli %v", got, want)
+		t.Errorf("subpaths differ:\nbuilt-in %v\nkicad-cli %v", got, want)
 	}
 }
